@@ -47,7 +47,7 @@ for macOS and Linux support.
 
 comruvi creates a readable TOML configuration at
 `~/.config/comruvi/config.toml` (on Windows, `%USERPROFILE%\.config\comruvi\config.toml`).
-It records `version = 0.01`, the last opened folder, and up to ten favorites as
+It records `version = 0.02`, the last opened folder, and up to ten favorites as
 `quick0` through `quick9`; unused quick keys are omitted. It also writes the
 reserved future settings `thumbnailsize`, `fonttype`, `fontsize`, and
 `displaymode`. The lower part of the Folders pane provides controls to add,
@@ -69,7 +69,8 @@ convention are intentionally compatible with [Geeqie](https://github.com/BestIma
 
 ## Current status
 
-**Alpha 1 (0.01).** Implemented: folder tree, resizable/toggleable panes,
+**Alpha 2 (0.02).** Implemented: folder tree, resizable/toggleable panes,
 persistent favorites, thumbnail grid, filmstrip, background thumbnail generation,
-ComfyUI-oriented metadata, and a synchronized secondary viewer window with
-zoom/pan. See [CHANGELOG.md](CHANGELOG.md) for the detailed history.
+ComfyUI-oriented metadata (including rgthree Power Lora Loader), and a
+synchronized secondary viewer window with zoom/pan. See
+[CHANGELOG.md](CHANGELOG.md) for the detailed history.

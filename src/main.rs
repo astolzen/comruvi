@@ -66,7 +66,7 @@ impl Config {
         let path = Self::path();
         if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
         let quote = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
-        let mut contents = format!("version = 0.01\nthumbnailsize = \"{}\"\nfonttype = \"{}\"\nfontsize = {}\ndisplaymode = \"{}\"\n", quote(&self.thumbnailsize), quote(&self.fonttype), self.fontsize, quote(&self.displaymode));
+        let mut contents = format!("version = 0.02\nthumbnailsize = \"{}\"\nfonttype = \"{}\"\nfontsize = {}\ndisplaymode = \"{}\"\n", quote(&self.thumbnailsize), quote(&self.fonttype), self.fontsize, quote(&self.displaymode));
         if let Some(folder) = &self.lastfolder { contents.push_str(&format!("lastfolder = \"{}\"\n", quote(&folder.to_string_lossy()))); }
         for (index, favorite) in self.favorites.iter().take(10).enumerate() { contents.push_str(&format!("quick{index} = \"{}\"\n", quote(&favorite.to_string_lossy()))); }
         fs::write(path, contents)?;
@@ -86,6 +86,11 @@ impl App {
         app
     }
     fn load_folder(&mut self) {
+        // Drop any in-flight job for the previous folder so the worker exits on
+        // the next send and the new folder can queue its own missing thumbs.
+        // Without this, rapid folder switches leave intermediate folders unqueued
+        // until the old job finishes — only the last folder gets a fresh job.
+        self.thumbnail_job = None;
         self.entries.clear(); self.selected = None; self.image_texture = None; self.thumb_textures.clear(); self.metadata = Metadata::default();
         if let Ok(read) = fs::read_dir(&self.folder) {
             let mut files: Vec<_> = read.flatten().filter_map(|x| {
@@ -447,15 +452,31 @@ fn add_loras(inputs: &serde_json::Map<String, Value>, fields: &mut Vec<(String, 
     }
     // LoraManager has used both a direct list and a `__value__` wrapped list.
     // Preserve each listed strength and active state for either representation.
-    let Some(loras) = inputs.get("loras") else { return; };
-    let entries = loras.as_array().or_else(|| loras.get("__value__").and_then(Value::as_array));
-    let Some(entries) = entries else { return; };
-    for lora in entries {
-        let Some(name) = lora.get("name").and_then(Value::as_str) else { continue; };
-        let strength = lora.get("strength").map(Value::to_string).unwrap_or_else(|| "?".into()).trim_matches('"').to_owned();
-        let clip = lora.get("clipStrength").map(Value::to_string).unwrap_or_else(|| strength.clone()).trim_matches('"').to_owned();
-        let active = lora.get("active").and_then(Value::as_bool).unwrap_or(true);
+    if let Some(loras) = inputs.get("loras") {
+        let entries = loras.as_array().or_else(|| loras.get("__value__").and_then(Value::as_array));
+        if let Some(entries) = entries {
+            for lora in entries {
+                let Some(name) = lora.get("name").and_then(Value::as_str) else { continue; };
+                let strength = lora.get("strength").map(Value::to_string).unwrap_or_else(|| "?".into()).trim_matches('"').to_owned();
+                let clip = lora.get("clipStrength").map(Value::to_string).unwrap_or_else(|| strength.clone()).trim_matches('"').to_owned();
+                let active = lora.get("active").and_then(Value::as_bool).unwrap_or(true);
+                let state = if active { "active" } else { "inactive" };
+                fields.push(("LoRA".into(), format!("{name} (model {strength}, CLIP {clip}; {state})")));
+            }
+        }
+    }
+    // Power Lora Loader (rgthree) stores slots as lora_1, lora_2, … with
+    // { on, lora, strength } — not lora_name / loras.
+    let mut power_slots: Vec<_> = inputs.iter()
+        .filter(|(key, value)| key.starts_with("lora_") && value.as_object().is_some_and(|slot| slot.contains_key("lora")))
+        .collect();
+    power_slots.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (_, value) in power_slots {
+        let Some(slot) = value.as_object() else { continue; };
+        let Some(name) = slot.get("lora").and_then(Value::as_str) else { continue; };
+        let strength = slot.get("strength").map(Value::to_string).unwrap_or_else(|| "?".into()).trim_matches('"').to_owned();
+        let active = slot.get("on").and_then(Value::as_bool).unwrap_or(true);
         let state = if active { "active" } else { "inactive" };
-        fields.push(("LoRA".into(), format!("{name} (model {strength}, CLIP {clip}; {state})")));
+        fields.push(("LoRA".into(), format!("{name} (weight {strength}; {state})")));
     }
 }

@@ -2,6 +2,22 @@
 
 All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
+## 0.02-alpha (Alpha 2) — 2026-10-17
+
+### Fixed
+
+- Switching folders while thumbnails are generating now abandons the previous
+  job and starts one for the new folder, so intermediate folders are not left
+  without an indicator or generation pass.
+- LoRA extraction now reads rgthree **Power Lora Loader** slots (`lora_1`,
+  `lora_2`, … with on/strength), so Krea2-style workflows show their LoRAs.
+
+### Known limitations
+
+- JPEG EXIF/XMP and compressed PNG `zTXt` metadata are not yet parsed.
+- An abandoned thumbnail worker may finish the image it was already processing
+  before it exits.
+
 ## 0.01-alpha (Alpha 1) — 2026-10-17
 
 ### Added
