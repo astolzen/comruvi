@@ -1,5 +1,6 @@
-# Project: „Rustview“  
-Folder: F:\sync\ast\git\rustview  
+# Project: „comruvi“ (ComfyUI Rust Viewer)  
+Folder: F:\sync\ast\git\comruvi  
+
 Code a portable Image Viewer in Rust which is optimized to display AI generated images with the generation data  
 The initial Version will work on Windows, but once we have a stable release of it, I want to port it to MacOS and Linux as well.  
 

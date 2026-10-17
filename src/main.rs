@@ -11,7 +11,7 @@ const THUMB_SIZE: u32 = 160;
 fn main() -> eframe::Result<()> {
     let folder = std::env::args().nth(1).map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok()).unwrap_or_default();
-    eframe::run_native("Rustview", eframe::NativeOptions::default(), Box::new(move |_| Ok(Box::new(App::new(folder)))))
+    eframe::run_native("comruvi", eframe::NativeOptions::default(), Box::new(move |_| Ok(Box::new(App::new(folder)))))
 }
 
 #[derive(Clone)]
@@ -26,12 +26,12 @@ struct App {
 }
 struct ThumbnailJob { receiver: Receiver<bool>, completed: usize, total: usize }
 #[derive(Default)]
-struct ViewTransform { scale: Option<f32>, pan: Vec2, last_drag: Vec2 }
-impl ViewTransform { fn reset(&mut self) { self.scale = None; self.pan = Vec2::ZERO; self.last_drag = Vec2::ZERO; } }
+struct ViewTransform { scale: Option<f32>, pan: Vec2 }
+impl ViewTransform { fn reset(&mut self) { self.scale = None; self.pan = Vec2::ZERO; } }
 #[derive(Clone, Copy, PartialEq)] enum Mode { Thumbnails, Filmstrip }
 
 /// The deliberately small, dependency-free TOML representation keeps preferences
-/// portable and readable at `~/.config/rustview/config.toml`.
+/// portable and readable at `~/.config/comruvi/config.toml`.
 struct Config {
     favorites: Vec<PathBuf>, lastfolder: Option<PathBuf>,
     thumbnailsize: String, fonttype: String, fontsize: u32, displaymode: String,
@@ -41,7 +41,7 @@ impl Config {
     fn path() -> PathBuf {
         std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
             .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
-            .join(".config").join("rustview").join("config.toml")
+            .join(".config").join("comruvi").join("config.toml")
     }
     fn load() -> Self {
         let mut config = Self::defaults();
@@ -186,6 +186,14 @@ impl eframe::App for App {
                 if ui.add_enabled(self.thumbnail_job.is_none(), egui::Button::new("↻ Recreate thumbnails")).clicked() { self.recreate_thumbnails(); }
                 ui.separator(); ui.checkbox(&mut self.show_tree, "Folders"); ui.checkbox(&mut self.show_info, "Info"); ui.separator();
                 ui.selectable_value(&mut self.mode, Mode::Thumbnails, "Thumbnails"); ui.selectable_value(&mut self.mode, Mode::Filmstrip, "Filmstrip");
+                if self.mode == Mode::Filmstrip {
+                    let zoom = match self.film_view.scale {
+                        Some(scale) => format!("Zoom: {:.0}%", scale * 100.0),
+                        None => "Zoom: Fit".into(),
+                    };
+                    ui.separator();
+                    ui.label(zoom);
+                }
                 if self.thumbnail_job.is_some() { ui.add(egui::Spinner::new()); }
                 if let Some(n) = &self.notice { ui.label(n); }
             });
@@ -259,7 +267,7 @@ fn viewer_ui(ctx: &EguiContext, app: &mut App) {
     let mut close_requested = false;
     ctx.show_viewport_immediate(
         egui::ViewportId::from_hash_of("separate-viewer"),
-        egui::ViewportBuilder::default().with_title("Rustview — viewer").with_inner_size([1000.0, 750.0]),
+        egui::ViewportBuilder::default().with_title("comruvi — viewer").with_inner_size([1000.0, 750.0]),
         |viewer_ctx, _| {
             close_requested = viewer_ctx.input(|input| input.viewport().close_requested());
             egui::CentralPanel::default().show(viewer_ctx, |ui| {
@@ -285,13 +293,7 @@ fn zoomable_image(ui: &mut egui::Ui, texture: &TextureHandle, view: &mut ViewTra
     if zoom_in || wheel > 0.0 { view.scale = Some(view.scale.unwrap_or(fit) * 1.15); }
     if zoom_out || wheel < 0.0 { view.scale = Some(view.scale.unwrap_or(fit) / 1.15); }
     if let Some(scale) = view.scale { view.scale = Some(scale.clamp(0.02, 32.0)); }
-    if response.drag_started() { view.last_drag = Vec2::ZERO; }
-    if response.dragged() {
-        let drag = response.drag_delta();
-        view.pan += drag - view.last_drag;
-        view.last_drag = drag;
-    }
-    if response.drag_stopped() { view.last_drag = Vec2::ZERO; }
+    if response.dragged() { view.pan += response.drag_delta(); }
     let scale = view.scale.unwrap_or(fit);
     let image_rect = egui::Rect::from_center_size(response.rect.center() + view.pan, source * scale);
     ui.painter().with_clip_rect(response.rect).image(texture.id(), image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);

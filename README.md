@@ -1,9 +1,12 @@
-# Rustview
+# comruvi
 
-Rustview is a local-first image browser intended for AI-generated images.  It shows
-folders, thumbnail and filmstrip views, and the generation metadata embedded in an
-image.  It currently supports PNG and JPEG on Windows; the UI and filesystem code
-are deliberately platform-neutral for a later macOS/Linux release.
+**comruvi** (ComfyUI Rust Viewer) is a local-first image browser intended for
+AI-generated images. It shows folders, thumbnail and filmstrip views, and the
+generation metadata embedded in an image. It currently supports PNG and JPEG on
+Windows; the UI and filesystem code are deliberately platform-neutral for a later
+macOS/Linux release.
+
+comruvi is a fully AI coded Project using both ChatGPT 5.6 and CursorAI.
 
 ## Install and run
 
@@ -15,7 +18,7 @@ cargo run --release -- <folder-with-images>
 ```
 
 Alternatively, use **Open folder** in the app. Original images are never written.
-The only files Rustview creates are PNG thumbnails under the selected folder's
+The only files comruvi creates are PNG thumbnails under the selected folder's
 `.thumbnails` directory. Their names follow Geeqie's compatible convention:
 `image.jpg` becomes `.thumbnails/image.jpg.png`.
 
@@ -33,7 +36,8 @@ for macOS and Linux support.
   separate viewer window.
 - In the filmstrip image and separate viewer, scroll the mouse wheel or press
   **Up/Down** to zoom, and drag with the mouse to pan. Press **0** to reset to fit
-  window or **1** for 100% (actual-pixel) zoom.
+  window or **1** for 100% (actual-pixel) zoom. Filmstrip mode shows the current
+  zoom level in the top toolbar.
 - The metadata pane exposes prompt, model, LoRA, workflow, and sampling data.
   Its copy buttons place their values on the system clipboard.
 - **Recreate thumbnails** performs work in the background. A progress indicator is
@@ -41,8 +45,8 @@ for macOS and Linux support.
 
 ## Settings and favorite places
 
-Rustview creates a readable TOML configuration at
-`~/.config/rustview/config.toml` (on Windows, `%USERPROFILE%\.config\rustview\config.toml`).
+comruvi creates a readable TOML configuration at
+`~/.config/comruvi/config.toml` (on Windows, `%USERPROFILE%\.config\comruvi\config.toml`).
 It records `version = 0.01`, the last opened folder, and up to ten favorites as
 `quick0` through `quick9`; unused quick keys are omitted. It also writes the
 reserved future settings `thumbnailsize`, `fonttype`, `fontsize`, and
@@ -51,7 +55,7 @@ select, and remove favorites.
 
 ## Metadata
 
-For PNG files Rustview reads `tEXt` and uncompressed `iTXt` chunks without modifying
+For PNG files comruvi reads `tEXt` and uncompressed `iTXt` chunks without modifying
 the image. It recognizes ComfyUI's `prompt` and `workflow` chunks, extracts common
 nodes (checkpoint/model, prompts, LoRA names/weights, sampler, seed, steps, CFG,
 and scheduler), and always exposes the raw metadata for copying. Compressed PNG
@@ -65,7 +69,7 @@ convention are intentionally compatible with [Geeqie](https://github.com/BestIma
 
 ## Current status
 
-Implemented: folder tree, resizable/toggleable panes, persistent favorites,
-thumbnail grid, filmstrip, background thumbnail generation, ComfyUI-oriented
-metadata, and a synchronized secondary viewer window with zoom/pan. See
-[CHANGELOG.md](CHANGELOG.md) for the detailed history.
+**Alpha 1 (0.01).** Implemented: folder tree, resizable/toggleable panes,
+persistent favorites, thumbnail grid, filmstrip, background thumbnail generation,
+ComfyUI-oriented metadata, and a synchronized secondary viewer window with
+zoom/pan. See [CHANGELOG.md](CHANGELOG.md) for the detailed history.

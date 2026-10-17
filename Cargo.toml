@@ -1,8 +1,8 @@
 [package]
-name = "rustview"
-version = "0.1.0"
+name = "comruvi"
+version = "0.0.1"
 edition = "2024"
-description = "A local-first image viewer for AI generation metadata"
+description = "comruvi — ComfyUI Rust Viewer, a local-first image browser for AI generation metadata"
 license = "MIT"
 
 [dependencies]

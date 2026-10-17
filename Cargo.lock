@@ -681,6 +681,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "comruvi"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "eframe",
+ "egui_extras",
+ "image",
+ "rfd",
+ "serde_json",
+]
+
+[[package]]
 name = "concurrent-queue"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2762,19 +2775,6 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
-
-[[package]]
-name = "rustview"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "arboard",
- "eframe",
- "egui_extras",
- "image",
- "rfd",
- "serde_json",
-]
 
 [[package]]
 name = "same-file"
