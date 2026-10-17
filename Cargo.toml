@@ -1,0 +1,15 @@
+[package]
+name = "rustview"
+version = "0.1.0"
+edition = "2024"
+description = "A local-first image viewer for AI generation metadata"
+license = "MIT"
+
+[dependencies]
+eframe = "0.31"
+egui_extras = { version = "0.31", features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+serde_json = "1"
+rfd = "0.15"
+arboard = "3"
+anyhow = "1"
