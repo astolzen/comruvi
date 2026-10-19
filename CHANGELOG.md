@@ -2,6 +2,42 @@
 
 All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
+## 0.03-alpha (Alpha 3) — 2026-10-19
+
+### Added
+
+- Modular, human-readable **metadata translator** files (TOML) that decide how
+  the right-hand info pane is filled. Each file has a trigger and a display-field
+  list.
+- Default translators shipped in `parsers/` and installed on first run into
+  `~/.config/comruvi/parsers` (overridable via `parserdir` in config.toml):
+  - `krea-ai` — Krea2 rebalance workflows (Power Lora / LoraManager)
+  - `anima-ai` — Positive/Negative CLIP title workflows
+  - `z-image` — Z-Image emoji prompt titles + Power Lora
+  - `flux2` — rgthree Lora Loader Stack workflows
+  - `comfyui-generic` — fallback ComfyUI prompt graph
+  - `photo` — JPEG EXIF camera metadata
+- JPEG EXIF extraction (camera, lens, shutter, aperture, ISO, focal length, date).
+- Info pane shows which translator matched (`Parser: …`).
+
+### Changed
+
+- Right-pane fields are no longer hardcoded in Rust; they come from the matched
+  translator, in file order.
+- Config writes `version = 0.03` and `parserdir`.
+- Generic ComfyUI fallback no longer shows a redundant `Generator: ComfyUI` row
+  (`Type` already identifies the image).
+
+### Documentation
+
+- Parser/translator TOML syntax is documented in [parsers/README.md](parsers/README.md).
+
+### Known limitations
+
+- Compressed PNG `zTXt` / `iTXt` is not yet parsed.
+- An abandoned thumbnail worker may finish the image it was already processing
+  before it exits.
+
 ## 0.02-alpha (Alpha 2) — 2026-10-17
 
 ### Fixed

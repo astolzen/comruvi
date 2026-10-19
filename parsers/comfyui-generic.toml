@@ -1,0 +1,14 @@
+# Fallback translator for any ComfyUI PNG that embeds a prompt node graph.
+# Uses sampler-link logic for positive/negative when titles are absent.
+name = "comfyui-generic"
+priority = 10
+filetype = "png"
+chunk = "prompt"
+builtin = "comfy_prompt"
+
+[[trigger]]
+text_key = "prompt"
+
+[[field]]
+label = "Type"
+constant = "ComfyUI generated Image"

@@ -1,0 +1,49 @@
+# Translator for Flux2 Klein workflows using rgthree Lora Loader Stack.
+name = "flux2"
+priority = 85
+filetype = "png"
+chunk = "prompt"
+
+[[trigger]]
+node_class = "Lora Loader Stack (rgthree)"
+
+[[field]]
+label = "Type"
+constant = "Flux2 AI generated Image"
+
+[[field]]
+label = "Model Name"
+node_class = "UNETLoader"
+input = "unet_name"
+
+[[field]]
+label = "LoRA"
+node_class = "Lora Loader Stack (rgthree)"
+extract = "lora_stack"
+
+[[field]]
+label = "Positive Prompt"
+node_class = "CLIPTextEncode"
+node_title = "CLIP Text Encode (Positive Prompt)"
+input = "text"
+
+[[field]]
+label = "Negative Prompt"
+node_class = "CLIPTextEncode"
+node_title = "CLIP Text Encode (Negative Prompt)"
+input = "text"
+
+[[field]]
+label = "seed"
+node_class = "KSampler"
+input = "seed"
+
+[[field]]
+label = "steps"
+node_class = "KSampler"
+input = "steps"
+
+[[field]]
+label = "cfg"
+node_class = "KSampler"
+input = "cfg"

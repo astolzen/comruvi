@@ -1,0 +1,58 @@
+# Translator for Krea2 ComfyUI workflows (single "Prompt" CLIP encode + Krea2 rebalance).
+name = "krea-ai"
+priority = 100
+filetype = "png"
+chunk = "prompt"
+
+[[trigger]]
+node_class = "ConditioningKrea2Rebalance"
+
+[[field]]
+label = "Type"
+constant = "Krea AI generated Image"
+
+[[field]]
+label = "Model Name"
+node_class = "UNETLoader"
+input = "unet_name"
+
+[[field]]
+label = "LoRA"
+node_class = "Power Lora Loader (rgthree)"
+extract = "power_lora"
+
+[[field]]
+label = "LoRA"
+node_class = "Lora Loader (LoraManager)"
+extract = "lora_manager"
+
+[[field]]
+label = "Positive Prompt"
+node_class = "CLIPTextEncode"
+node_title = "CLIP Text Encode (Prompt)"
+input = "text"
+
+[[field]]
+label = "seed"
+node_class = "KSampler"
+input = "seed"
+
+[[field]]
+label = "steps"
+node_class = "KSampler"
+input = "steps"
+
+[[field]]
+label = "cfg"
+node_class = "KSampler"
+input = "cfg"
+
+[[field]]
+label = "sampler"
+node_class = "KSampler"
+input = "sampler_name"
+
+[[field]]
+label = "scheduler"
+node_class = "KSampler"
+input = "scheduler"

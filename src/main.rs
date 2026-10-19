@@ -1,10 +1,12 @@
-use std::{collections::BTreeMap, fs, io::Read, path::{Path, PathBuf}, sync::mpsc::{self, Receiver}, time::Duration};
+mod meta_parsers;
+
+use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, sync::mpsc::{self, Receiver}, time::Duration};
 
 use anyhow::{Context, Result};
 use arboard::Clipboard;
 use eframe::egui::{self, ColorImage, Context as EguiContext, Image, ScrollArea, TextureHandle, TextureOptions, Vec2};
 use image::imageops::FilterType;
-use serde_json::Value;
+use meta_parsers::{default_parser_dir, load_parsers, read_metadata, Metadata, ParserConfig};
 
 const THUMB_SIZE: u32 = 160;
 
@@ -21,6 +23,9 @@ struct App {
     folder: PathBuf, tree_root: PathBuf, entries: Vec<Entry>, selected: Option<usize>, mode: Mode,
     show_tree: bool, show_info: bool, viewer_open: bool, thumb_textures: BTreeMap<PathBuf, TextureHandle>,
     image_texture: Option<TextureHandle>, metadata: Metadata, notice: Option<String>, config: Config,
+    parsers: Vec<ParserConfig>,
+    /// Last laid-out thumbnail grid column count (for Up/Down row navigation).
+    thumb_columns: usize,
     thumbnail_job: Option<ThumbnailJob>,
     film_view: ViewTransform, viewer_view: ViewTransform,
 }
@@ -35,9 +40,15 @@ impl ViewTransform { fn reset(&mut self) { self.scale = None; self.pan = Vec2::Z
 struct Config {
     favorites: Vec<PathBuf>, lastfolder: Option<PathBuf>,
     thumbnailsize: String, fonttype: String, fontsize: u32, displaymode: String,
+    parserdir: PathBuf,
 }
 impl Config {
-    fn defaults() -> Self { Self { favorites: vec![], lastfolder: None, thumbnailsize: "160x160".into(), fonttype: "default".into(), fontsize: 14, displaymode: "dark".into() } }
+    fn defaults() -> Self {
+        Self {
+            favorites: vec![], lastfolder: None, thumbnailsize: "160x160".into(), fonttype: "default".into(),
+            fontsize: 14, displaymode: "dark".into(), parserdir: default_parser_dir(),
+        }
+    }
     fn path() -> PathBuf {
         std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))
             .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
@@ -55,6 +66,7 @@ impl Config {
                 "fonttype" => config.fonttype = value,
                 "fontsize" => if let Ok(size) = value.parse() { config.fontsize = size; },
                 "displaymode" => config.displaymode = value,
+                "parserdir" => if !value.is_empty() { config.parserdir = PathBuf::from(value); },
                 _ if key.starts_with("quick") && key[5..].parse::<usize>().is_ok_and(|index| index < 10) && !value.is_empty() => config.favorites.push(PathBuf::from(value)),
                 _ => {}
             }
@@ -66,7 +78,11 @@ impl Config {
         let path = Self::path();
         if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
         let quote = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
-        let mut contents = format!("version = 0.02\nthumbnailsize = \"{}\"\nfonttype = \"{}\"\nfontsize = {}\ndisplaymode = \"{}\"\n", quote(&self.thumbnailsize), quote(&self.fonttype), self.fontsize, quote(&self.displaymode));
+        let mut contents = format!(
+            "version = 0.03\nthumbnailsize = \"{}\"\nfonttype = \"{}\"\nfontsize = {}\ndisplaymode = \"{}\"\nparserdir = \"{}\"\n",
+            quote(&self.thumbnailsize), quote(&self.fonttype), self.fontsize, quote(&self.displaymode),
+            quote(&self.parserdir.to_string_lossy()),
+        );
         if let Some(folder) = &self.lastfolder { contents.push_str(&format!("lastfolder = \"{}\"\n", quote(&folder.to_string_lossy()))); }
         for (index, favorite) in self.favorites.iter().take(10).enumerate() { contents.push_str(&format!("quick{index} = \"{}\"\n", quote(&favorite.to_string_lossy()))); }
         fs::write(path, contents)?;
@@ -78,7 +94,16 @@ impl App {
     fn new(folder: PathBuf) -> Self {
         let config = Config::load();
         let folder = config.lastfolder.as_ref().filter(|path| path.is_dir()).cloned().unwrap_or(folder);
-        let mut app = Self { tree_root: folder.clone(), folder, entries: vec![], selected: None, mode: Mode::Thumbnails, show_tree: true, show_info: true, viewer_open: false, thumb_textures: BTreeMap::new(), image_texture: None, metadata: Metadata::default(), notice: None, config, thumbnail_job: None, film_view: ViewTransform::default(), viewer_view: ViewTransform::default() };
+        let (parsers, parser_notice) = match load_parsers(&config.parserdir) {
+            Ok(parsers) => (parsers, None),
+            Err(error) => (Vec::new(), Some(format!("Could not load parsers: {error}"))),
+        };
+        let mut app = Self {
+            tree_root: folder.clone(), folder, entries: vec![], selected: None, mode: Mode::Thumbnails,
+            show_tree: true, show_info: true, viewer_open: false, thumb_textures: BTreeMap::new(),
+            image_texture: None, metadata: Metadata::default(), notice: parser_notice, config, parsers,
+            thumb_columns: 1, thumbnail_job: None, film_view: ViewTransform::default(), viewer_view: ViewTransform::default(),
+        };
         app.load_folder();
         // Create/update the config on first launch as well, so every documented
         // placeholder has a stable default value.
@@ -104,7 +129,8 @@ impl App {
         if self.selected == Some(index) { return; }
         self.selected = Some(index); self.image_texture = None;
         self.film_view.reset(); self.viewer_view.reset();
-        let path = self.entries[index].path.clone(); self.metadata = read_metadata(&path).unwrap_or_else(|e| Metadata::error(e.to_string()));
+        let path = self.entries[index].path.clone();
+        self.metadata = read_metadata(&path, &self.parsers).unwrap_or_else(|e| Metadata::error(e.to_string()));
         if let Ok(image) = load_image(&path) { self.image_texture = Some(ctx.load_texture("full-image", image, TextureOptions::default())); }
     }
     fn thumbnail(&mut self, entry: &Entry, ctx: &EguiContext) -> Option<TextureHandle> {
@@ -180,10 +206,15 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &EguiContext, _: &mut eframe::Frame) {
         self.poll_thumbnail_job();
         if self.thumbnail_job.is_some() { ctx.request_repaint_after(Duration::from_millis(100)); }
-        // Navigation remains available in either main-view mode and updates an
-        // already-open secondary viewer through the shared selected image.
+        // Left/Right move the selection in both modes. Up/Down move by grid row
+        // in Thumbnails only — Filmstrip keeps those keys for zoom.
         if ctx.input(|input| input.key_pressed(egui::Key::ArrowLeft)) { self.navigate(-1, ctx); }
         if ctx.input(|input| input.key_pressed(egui::Key::ArrowRight)) { self.navigate(1, ctx); }
+        if self.mode == Mode::Thumbnails {
+            let step = self.thumb_columns.max(1) as isize;
+            if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) { self.navigate(-step, ctx); }
+            if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown)) { self.navigate(step, ctx); }
+        }
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("Open folder").clicked() { if let Some(p) = rfd::FileDialog::new().pick_folder() { self.tree_root = p.clone(); self.folder = p; self.load_folder(); self.remember_folder(); } }
@@ -252,9 +283,25 @@ fn folder_tree(ui: &mut egui::Ui, dir: &Path, selected: &mut PathBuf, changed: &
 fn thumbnails_ui(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
     ui.heading(app.folder.display().to_string()); ui.label(format!("{} image(s) · double-click an image to open the separate viewer", app.entries.len()));
     let width = ui.available_width(); let columns = (width / 184.0).max(1.0) as usize;
+    app.thumb_columns = columns;
     ScrollArea::vertical().show(ui, |ui| {
         egui::Grid::new("thumb-grid").spacing([18.0, 14.0]).show(ui, |ui| {
-            for i in 0..app.entries.len() { let entry = app.entries[i].clone(); let texture = app.thumbnail(&entry, ctx); ui.vertical(|ui| { let r = if let Some(t) = texture { ui.add(egui::ImageButton::new(Image::new(&t).fit_to_exact_size(Vec2::splat(160.0))).selected(app.selected == Some(i))) } else { ui.button("Unreadable") }; if r.clicked() { app.select(i, ctx); } if r.double_clicked() { app.viewer_open = true; } ui.label(egui::RichText::new(entry.name).small()); }); if (i + 1) % columns == 0 { ui.end_row(); } }
+            for i in 0..app.entries.len() {
+                let entry = app.entries[i].clone();
+                let texture = app.thumbnail(&entry, ctx);
+                ui.vertical(|ui| {
+                    let r = if let Some(t) = texture {
+                        ui.add(egui::ImageButton::new(Image::new(&t).fit_to_exact_size(Vec2::splat(160.0))).selected(app.selected == Some(i)))
+                    } else {
+                        ui.button("…")
+                    };
+                    if r.clicked() { app.select(i, ctx); }
+                    if r.double_clicked() { app.viewer_open = true; }
+                    if app.selected == Some(i) { r.scroll_to_me(Some(egui::Align::Center)); }
+                    ui.label(egui::RichText::new(entry.name).small());
+                });
+                if (i + 1) % columns == 0 { ui.end_row(); }
+            }
         });
     });
 }
@@ -304,39 +351,39 @@ fn zoomable_image(ui: &mut egui::Ui, texture: &TextureHandle, view: &mut ViewTra
     ui.painter().with_clip_rect(response.rect).image(texture.id(), image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
 }
 
-#[derive(Default)] struct Metadata { fields: Vec<(String, String)>, raw: Vec<(String, String)> }
-impl Metadata { fn error(e: String) -> Self { Self { fields: vec![("Error".into(), e)], raw: vec![] } } }
 fn metadata_ui(ui: &mut egui::Ui, m: &Metadata) {
     ui.heading("Image information");
+    if let Some(parser) = &m.parser {
+        ui.label(egui::RichText::new(format!("Parser: {parser}")).small().weak());
+    }
     ScrollArea::vertical().show(ui, |ui| {
-        // Keep this presentation order independent of a generator's JSON node order.
-        for key in ["File", "Dimensions", "Model"] { for (field, value) in m.fields.iter().filter(|(field, _)| field == key) { metadata_field(ui, field, value); } }
-        let loras: Vec<_> = m.fields.iter().filter(|(field, _)| field == "LoRA").collect();
-        if !loras.is_empty() {
-            ui.label(egui::RichText::new("LoRA list").strong());
-            for (_, value) in loras {
-                let inactive = value.contains("; inactive)");
-                ui.horizontal_wrapped(|ui| {
-                    if inactive { ui.colored_label(egui::Color32::GRAY, value); }
-                    else { ui.label(value); }
-                    if ui.small_button("Copy").clicked() { copy(value); }
-                });
+        // Render translator fields in config order. LoRA rows stay grouped with
+        // inactive entries shown in gray ("; inactive)" marker from extractors).
+        let mut index = 0;
+        while index < m.fields.len() {
+            let (field, value) = &m.fields[index];
+            if field == "LoRA" || field.eq_ignore_ascii_case("LoRA List") {
+                ui.label(egui::RichText::new("LoRA list").strong());
+                while index < m.fields.len() && (m.fields[index].0 == "LoRA" || m.fields[index].0.eq_ignore_ascii_case("LoRA List")) {
+                    let value = &m.fields[index].1;
+                    let inactive = value.contains("; inactive)");
+                    ui.horizontal_wrapped(|ui| {
+                        if inactive { ui.colored_label(egui::Color32::GRAY, value); }
+                        else { ui.label(value); }
+                        if ui.small_button("Copy").clicked() { copy(value); }
+                    });
+                    index += 1;
+                }
+                ui.separator();
+                continue;
             }
-            ui.separator();
-        }
-        for key in ["Text prompt", "Positive prompt", "Negative prompt"] {
-            for (field, value) in m.fields.iter().filter(|(field, _)| field == key || (key == "Negative prompt" && field.starts_with("Negative prompt ("))) { metadata_field(ui, field, value); }
+            metadata_field(ui, field, value);
+            index += 1;
         }
         if let Some((_, workflow)) = m.raw.iter().find(|(key, _)| key.eq_ignore_ascii_case("workflow")) {
             if ui.button("Copy workflow").clicked() { copy(workflow); }
             ui.separator();
         }
-        ui.collapsing("Other parameters", |ui| {
-            for (field, value) in &m.fields {
-                let primary = matches!(field.as_str(), "File" | "Dimensions" | "Model" | "LoRA" | "Text prompt" | "Positive prompt") || field.starts_with("Negative prompt");
-                if !primary { metadata_field(ui, field, value); }
-            }
-        });
     });
 }
 fn metadata_field(ui: &mut egui::Ui, key: &str, value: &str) {
@@ -350,133 +397,3 @@ fn is_image(p: &Path) -> bool { matches!(p.extension().and_then(|x| x.to_str()).
 fn thumbnail_path(image: &Path) -> PathBuf { image.parent().unwrap_or(Path::new(".")).join(".thumbnails").join(format!("{}.png", image.file_name().unwrap_or_default().to_string_lossy())) }
 fn create_thumbnail(source: &Path, destination: &Path) -> Result<()> { let img = image::open(source).with_context(|| format!("opening {}", source.display()))?; if let Some(p) = destination.parent() { fs::create_dir_all(p)?; } img.resize(THUMB_SIZE, THUMB_SIZE, FilterType::Lanczos3).save_with_format(destination, image::ImageFormat::Png)?; Ok(()) }
 fn load_image(path: &Path) -> Result<ColorImage> { let img = image::open(path)?.to_rgba8(); let size = [img.width() as usize, img.height() as usize]; Ok(ColorImage::from_rgba_unmultiplied(size, img.as_raw())) }
-
-fn read_metadata(path: &Path) -> Result<Metadata> {
-    let image = image::open(path)?; let mut m = Metadata { fields: vec![("File".into(), path.file_name().unwrap_or_default().to_string_lossy().into()), ("Dimensions".into(), format!("{} × {}", image.width(), image.height())), ("Format".into(), path.extension().and_then(|x| x.to_str()).unwrap_or("unknown").to_ascii_uppercase())], raw: vec![] };
-    if path.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("png")) { let chunks = png_text_chunks(path)?; for (key, value) in &chunks { m.raw.push((key.clone(), value.clone())); } if let Some((_, prompt)) = chunks.iter().find(|(k, _)| k == "prompt") { comfy_fields(prompt, &mut m.fields); } }
-    Ok(m)
-}
-fn png_text_chunks(path: &Path) -> Result<Vec<(String, String)>> {
-    let mut bytes = vec![];
-    fs::File::open(path)?.read_to_end(&mut bytes)?;
-    let mut result = vec![];
-    let mut pos = 8usize; // PNG signature
-    while pos + 12 <= bytes.len() {
-        let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into()?) as usize;
-        let kind = &bytes[pos + 4..pos + 8];
-        if pos + 12 + len > bytes.len() { break; }
-        let data = &bytes[pos + 8..pos + 8 + len];
-        if kind == b"tEXt" {
-            if let Some(n) = data.iter().position(|x| *x == 0) {
-                result.push((String::from_utf8_lossy(&data[..n]).into_owned(), String::from_utf8_lossy(&data[n + 1..]).into_owned()));
-            }
-        } else if kind == b"iTXt" {
-            // keyword, compression flag, method, language, translated keyword, text
-            let mut parts = data.splitn(6, |x| *x == 0);
-            let key = parts.next().unwrap_or_default();
-            let flag = parts.next().unwrap_or_default();
-            let _method = parts.next();
-            let _language = parts.next();
-            let _translated = parts.next();
-            let text = parts.next().unwrap_or_default();
-            if flag == [0] { result.push((String::from_utf8_lossy(key).into_owned(), String::from_utf8_lossy(text).into_owned())); }
-        }
-        pos += 12 + len; // data + type/length/crc
-    }
-    Ok(result)
-}
-fn comfy_fields(prompt: &str, fields: &mut Vec<(String, String)>) {
-    let Ok(nodes) = serde_json::from_str::<Value>(prompt) else { fields.push(("ComfyUI prompt".into(), prompt.into())); return; };
-    fields.push(("Generator".into(), "ComfyUI".into()));
-    let Some(map) = nodes.as_object() else { return; };
-
-    // A workflow's JSON order is not semantic. The KSampler links tell us which
-    // CLIPTextEncode node is positive and which is negative.
-    let mut positive_nodes = Vec::new();
-    let mut negative_nodes = Vec::new();
-    for node in map.values() {
-        let class = node.get("class_type").and_then(Value::as_str).unwrap_or("");
-        let Some(inputs) = node.get("inputs").and_then(Value::as_object) else { continue; };
-        if matches!(class, "KSampler" | "KSamplerAdvanced") {
-            if let Some(id) = linked_node(inputs, "positive") { positive_nodes.push(id); }
-            if let Some(id) = linked_node(inputs, "negative") { negative_nodes.push(id); }
-        }
-    }
-
-    for (id, node) in map {
-        let class = node.get("class_type").and_then(Value::as_str).unwrap_or("");
-        let Some(inputs) = node.get("inputs").and_then(Value::as_object) else { continue; };
-        match class {
-            "CheckpointLoaderSimple" | "UNETLoader" => {
-                if let Some(v) = input_text(inputs, "ckpt_name").or_else(|| input_text(inputs, "unet_name")) { fields.push(("Model".into(), v)); }
-            }
-            "CLIPTextEncode" => if let Some(v) = input_text(inputs, "text") {
-                let label = if positive_nodes.iter().any(|node_id| node_id == id) { "Positive prompt" }
-                    else if negative_nodes.iter().any(|node_id| node_id == id) { "Negative prompt" }
-                    else { "Text prompt" };
-                fields.push((label.into(), v));
-            },
-            "KSampler" | "KSamplerAdvanced" => for key in ["seed", "steps", "cfg", "sampler_name", "scheduler", "denoise"] {
-                if let Some(v) = input_text(inputs, key) { fields.push((key.replace('_', " "), v)); }
-            },
-            _ if class.to_ascii_lowercase().contains("lora") => add_loras(inputs, fields),
-            _ => {}
-        }
-    }
-    // Some workflows genuinely save the same conditioning text on both sampler
-    // inputs. Make that provenance visible instead of implying it is a separate
-    // negative prompt entered by the user.
-    let positive = fields.iter().find(|(key, _)| key == "Positive prompt").map(|(_, value)| value.clone());
-    if let Some(positive) = positive {
-        for (key, value) in fields.iter_mut() {
-            if key == "Negative prompt" && value == &positive { *key = "Negative prompt (same as positive in image metadata)".into(); }
-        }
-    }
-}
-
-fn input_text(inputs: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
-    inputs.get(key).map(|value| value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()))
-}
-
-fn linked_node(inputs: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
-    let value = inputs.get(key)?.as_array()?.first()?;
-    value.as_str().map(str::to_owned).or_else(|| value.as_u64().map(|id| id.to_string()))
-}
-
-fn add_loras(inputs: &serde_json::Map<String, Value>, fields: &mut Vec<(String, String)>) {
-    if let Some(name) = input_text(inputs, "lora_name") {
-        let model_weight = input_text(inputs, "strength_model").unwrap_or_else(|| "?".into());
-        let clip_weight = input_text(inputs, "strength_clip");
-        let weights = clip_weight.map_or_else(|| format!("weight {model_weight}"), |clip| format!("model {model_weight}, CLIP {clip}"));
-        fields.push(("LoRA".into(), format!("{name} ({weights})")));
-    }
-    // LoraManager has used both a direct list and a `__value__` wrapped list.
-    // Preserve each listed strength and active state for either representation.
-    if let Some(loras) = inputs.get("loras") {
-        let entries = loras.as_array().or_else(|| loras.get("__value__").and_then(Value::as_array));
-        if let Some(entries) = entries {
-            for lora in entries {
-                let Some(name) = lora.get("name").and_then(Value::as_str) else { continue; };
-                let strength = lora.get("strength").map(Value::to_string).unwrap_or_else(|| "?".into()).trim_matches('"').to_owned();
-                let clip = lora.get("clipStrength").map(Value::to_string).unwrap_or_else(|| strength.clone()).trim_matches('"').to_owned();
-                let active = lora.get("active").and_then(Value::as_bool).unwrap_or(true);
-                let state = if active { "active" } else { "inactive" };
-                fields.push(("LoRA".into(), format!("{name} (model {strength}, CLIP {clip}; {state})")));
-            }
-        }
-    }
-    // Power Lora Loader (rgthree) stores slots as lora_1, lora_2, … with
-    // { on, lora, strength } — not lora_name / loras.
-    let mut power_slots: Vec<_> = inputs.iter()
-        .filter(|(key, value)| key.starts_with("lora_") && value.as_object().is_some_and(|slot| slot.contains_key("lora")))
-        .collect();
-    power_slots.sort_by(|(a, _), (b, _)| a.cmp(b));
-    for (_, value) in power_slots {
-        let Some(slot) = value.as_object() else { continue; };
-        let Some(name) = slot.get("lora").and_then(Value::as_str) else { continue; };
-        let strength = slot.get("strength").map(Value::to_string).unwrap_or_else(|| "?".into()).trim_matches('"').to_owned();
-        let active = slot.get("on").and_then(Value::as_bool).unwrap_or(true);
-        let state = if active { "active" } else { "inactive" };
-        fields.push(("LoRA".into(), format!("{name} (weight {strength}; {state})")));
-    }
-}

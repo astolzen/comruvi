@@ -1,0 +1,43 @@
+# Translator for digital camera JPEGs that carry EXIF camera metadata.
+name = "photo"
+priority = 50
+filetype = "jpg"
+
+[[trigger]]
+exif = "Model"
+
+[[field]]
+label = "Type"
+constant = "Photo"
+
+[[field]]
+label = "Kamera"
+exif = "Model"
+
+[[field]]
+label = "Make"
+exif = "Make"
+
+[[field]]
+label = "Lens"
+exif = "LensModel"
+
+[[field]]
+label = "Shutter Speed"
+exif = "ExposureTime"
+
+[[field]]
+label = "Aperture"
+exif = "FNumber"
+
+[[field]]
+label = "ISO"
+exif = "ISO"
+
+[[field]]
+label = "Focal Length"
+exif = "FocalLength"
+
+[[field]]
+label = "Date"
+exif = "DateTimeOriginal"

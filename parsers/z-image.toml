@@ -1,0 +1,60 @@
+# Translator for Z-Image style workflows (emoji CLIP titles + Power Lora Loader).
+name = "z-image"
+priority = 90
+filetype = "png"
+chunk = "prompt"
+
+[[trigger]]
+node_class = "CLIPTextEncode"
+node_title_contains = "Positive Prompt (Use natural language"
+
+[[field]]
+label = "Type"
+constant = "Z-Image AI generated Image"
+
+[[field]]
+label = "Model Name"
+node_class = "UNETLoader"
+input = "unet_name"
+
+[[field]]
+label = "LoRA"
+node_class = "Power Lora Loader (rgthree)"
+extract = "power_lora"
+
+[[field]]
+label = "Positive Prompt"
+node_class = "CLIPTextEncode"
+node_title_contains = "Positive Prompt (Use natural language"
+input = "text"
+
+[[field]]
+label = "Negative Prompt"
+node_class = "CLIPTextEncode"
+node_title_contains = "Negative Prompt"
+input = "text"
+
+[[field]]
+label = "seed"
+node_class = "KSampler"
+input = "seed"
+
+[[field]]
+label = "steps"
+node_class = "KSampler"
+input = "steps"
+
+[[field]]
+label = "cfg"
+node_class = "KSampler"
+input = "cfg"
+
+[[field]]
+label = "sampler"
+node_class = "KSampler"
+input = "sampler_name"
+
+[[field]]
+label = "scheduler"
+node_class = "KSampler"
+input = "scheduler"

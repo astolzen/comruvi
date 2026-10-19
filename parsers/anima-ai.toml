@@ -1,0 +1,65 @@
+# Translator for Anima-style ComfyUI workflows (explicit Positive/Negative CLIP titles).
+name = "anima-ai"
+priority = 80
+filetype = "png"
+chunk = "prompt"
+
+[[trigger]]
+node_class = "CLIPTextEncode"
+node_title = "CLIP Text Encode (Positive Prompt)"
+
+[[field]]
+label = "Type"
+constant = "Anima AI generated Image"
+
+[[field]]
+label = "Model Name"
+node_class = "UNETLoader"
+input = "unet_name"
+
+[[field]]
+label = "LoRA"
+node_class = "LoraLoaderModelOnly"
+extract = "lora_loader"
+
+[[field]]
+label = "LoRA"
+node_class = "Lora Loader (LoraManager)"
+extract = "lora_manager"
+
+[[field]]
+label = "Positive Prompt"
+node_class = "CLIPTextEncode"
+node_title = "CLIP Text Encode (Positive Prompt)"
+input = "text"
+
+[[field]]
+label = "Negative Prompt"
+node_class = "CLIPTextEncode"
+node_title = "CLIP Text Encode (Negative Prompt)"
+input = "text"
+
+[[field]]
+label = "seed"
+node_class = "KSampler"
+input = "seed"
+
+[[field]]
+label = "steps"
+node_class = "KSampler"
+input = "steps"
+
+[[field]]
+label = "cfg"
+node_class = "KSampler"
+input = "cfg"
+
+[[field]]
+label = "sampler"
+node_class = "KSampler"
+input = "sampler_name"
+
+[[field]]
+label = "scheduler"
+node_class = "KSampler"
+input = "scheduler"
