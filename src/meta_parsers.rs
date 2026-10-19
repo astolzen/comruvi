@@ -139,10 +139,11 @@ pub fn load_parsers(dir: &Path) -> Result<Vec<ParserConfig>> {
 
 pub fn read_metadata(path: &Path, parsers: &[ParserConfig]) -> Result<Metadata> {
     let image = image::open(path)?;
+    let (width, height) = oriented_dimensions(image.width(), image.height(), exif_orientation(path));
     let mut meta = Metadata {
         fields: vec![
             ("File".into(), path.file_name().unwrap_or_default().to_string_lossy().into()),
-            ("Dimensions".into(), format!("{} × {}", image.width(), image.height())),
+            ("Dimensions".into(), format!("{width} × {height}")),
             ("Format".into(), path.extension().and_then(|x| x.to_str()).unwrap_or("unknown").to_ascii_uppercase()),
         ],
         raw: vec![],
@@ -430,6 +431,26 @@ pub fn png_text_chunks(path: &Path) -> Result<Vec<(String, String)>> {
         pos += 12 + len;
     }
     Ok(result)
+}
+
+fn oriented_dimensions(width: u32, height: u32, orientation: u32) -> (u32, u32) {
+    match orientation {
+        5 | 6 | 7 | 8 => (height, width),
+        _ => (width, height),
+    }
+}
+
+/// EXIF Orientation tag (1–8). Returns 1 when missing or unreadable.
+pub fn exif_orientation(path: &Path) -> u32 {
+    let Ok(file) = fs::File::open(path) else { return 1; };
+    let mut reader = BufReader::new(file);
+    let Ok(exif) = ExifReader::new().read_from_container(&mut reader) else { return 1; };
+    exif.get_field(Tag::Orientation, In::PRIMARY)
+        .and_then(|field| match &field.value {
+            ExifValue::Short(values) => values.first().copied().map(u32::from),
+            _ => None,
+        })
+        .unwrap_or(1)
 }
 
 fn read_exif_map(path: &Path) -> Result<BTreeMap<String, String>> {

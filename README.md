@@ -28,9 +28,9 @@ for macOS and Linux support.
 
 ## Using the viewer
 
-- The **Folders** pane is a tree. Select a folder to browse it; use **↑ Up** to
-  move to its parent. The lower **Favorite places** area provides persistent
-  shortcuts.
+- The **Folders** pane is a tree with its own scrollbar. Click a name to open that
+  folder; use ▸/▾ to expand or collapse. **↑ Up** moves to the parent. The lower
+  **Favorite places** area provides persistent shortcuts.
 - Choose **Thumbnails** for a grid or **Filmstrip** for the selected image plus a
   centered thumbnail strip. Click an image to select it; double-click to open the
   separate viewer window. **Left/Right** move the selection in both modes;
@@ -43,13 +43,14 @@ for macOS and Linux support.
   parser config by a trigger, then the right pane shows the configured fields.
   Copy buttons place values on the system clipboard.
 - **Recreate thumbnails** performs work in the background. A progress indicator is
-  displayed while thumbnails are created or updated.
+  displayed while thumbnails are created or updated. JPEG EXIF orientation is
+  applied for filmstrip, the separate viewer, and newly built thumbnails.
 
 ## Settings and favorite places
 
 comruvi creates a readable TOML configuration at
 `~/.config/comruvi/config.toml` (on Windows, `%USERPROFILE%\.config\comruvi\config.toml`).
-It records `version = 0.03`, the last opened folder, `parserdir` (directory of
+It records `version = 0.04`, the last opened folder, `parserdir` (directory of
 translator files), and up to ten favorites as `quick0` through `quick9`; unused
 quick keys are omitted. It also writes the reserved future settings
 `thumbnailsize`, `fonttype`, `fontsize`, and `displaymode`. The lower part of
@@ -73,8 +74,8 @@ keys, triggers, field sources (`constant` / `input` / `extract` / `exif`),
 built-ins, and examples.
 
 For PNG files comruvi reads `tEXt` and uncompressed `iTXt` chunks without modifying
-the image. JPEG EXIF is read for camera metadata. Compressed PNG `zTXt` is not
-yet parsed.
+the image. JPEG EXIF is read for camera metadata and for **Orientation** when
+displaying or thumbnailing photos. Compressed PNG `zTXt` is not yet parsed.
 
 ## Credits
 
@@ -83,8 +84,8 @@ convention are intentionally compatible with [Geeqie](https://github.com/BestIma
 
 ## Current status
 
-**Alpha 3 (0.03).** Implemented: folder tree, resizable/toggleable panes,
-persistent favorites, thumbnail grid, filmstrip, background thumbnail generation,
-modular metadata translators (ComfyUI + EXIF photo), and a synchronized
-secondary viewer window with zoom/pan. See [CHANGELOG.md](CHANGELOG.md) for the
-detailed history.
+**Alpha 4 (0.04).** Implemented: folder tree with independent scroll, persistent
+favorites, thumbnail grid, filmstrip, background thumbnail generation, modular
+metadata translators (ComfyUI + EXIF photo), JPEG orientation-aware display, and
+a synchronized secondary viewer window with zoom/pan. See
+[CHANGELOG.md](CHANGELOG.md) for the detailed history.

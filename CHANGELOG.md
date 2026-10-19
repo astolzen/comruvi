@@ -2,6 +2,25 @@
 
 All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
+## 0.04-alpha (Alpha 4) — 2026-10-19
+
+### Fixed
+
+- Folder tree: selecting a folder is separate from expand/collapse, so after
+  **↑ Up** you can click back into a subfolder. Ancestors of the current folder
+  stay open.
+- Folder tree mouse-wheel scroll no longer steals events for the favorites list;
+  the tree has its own scroll region and an always-visible scrollbar.
+- Thumbnail creation stays responsive: at most a few thumb→texture loads run per
+  frame (creation itself was already on a worker thread).
+- JPEG **EXIF Orientation** is applied in filmstrip, full viewer, and new
+  thumbnails so portrait photos are not shown as landscape. Use
+  **↻ Recreate thumbnails** once for older thumbnail caches.
+
+### Changed
+
+- Config writes `version = 0.04`.
+
 ## 0.03-alpha (Alpha 3) — 2026-10-19
 
 ### Added
