@@ -77,6 +77,11 @@ For PNG files comruvi reads `tEXt` and uncompressed `iTXt` chunks without modify
 the image. JPEG EXIF is read for camera metadata and for **Orientation** when
 displaying or thumbnailing photos. Compressed PNG `zTXt` is not yet parsed.
 
+## License
+
+comruvi is licensed under the [GNU Affero General Public License v3.0](LICENSE)
+(AGPL-3.0).
+
 ## Credits
 
 No code has been copied from other viewers. The thumbnail layout and filename

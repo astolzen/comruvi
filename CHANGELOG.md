@@ -4,6 +4,10 @@ All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
 ## 0.04-alpha (Alpha 4) — 2026-10-19
 
+### Changed
+
+- Project license set to **AGPL-3.0** (`LICENSE`, `Cargo.toml`, README).
+
 ### Fixed
 
 - Folder tree: selecting a folder is separate from expand/collapse, so after
