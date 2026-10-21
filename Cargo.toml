@@ -1,6 +1,6 @@
 [package]
 name = "comruvi"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 description = "comruvi — ComfyUI Rust Viewer, a local-first image browser for AI generation metadata"
 license = "AGPL-3.0-only"
@@ -16,3 +16,8 @@ anyhow = "1"
 toml = "0.8"
 serde = { version = "1.0.229", features = ["derive"] }
 kamadak-exif = "0.5.5"
+raw-window-handle = "0.6"
+notify = "6"
+
+[target.'cfg(windows)'.dependencies]
+drag = "2.1"

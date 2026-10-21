@@ -34,7 +34,14 @@ has been successfully compiled and run on **Windows** and on **Fedora Linux 44**
 - Choose **Thumbnails** for a grid or **Filmstrip** for the selected image plus a
   centered thumbnail strip. Click an image to select it; double-click to open the
   separate viewer window. **Left/Right** move the selection in both modes;
-  **Up/Down** move by grid row in Thumbnails.
+  **Up/Down** move by grid row in Thumbnails; **Home** / **End** jump to the
+  first or last image. Arrow / Home / End scroll the selection into view; mouse
+  wheel scrolling does not snap back to the selection.
+- The open folder is watched for new or removed images so the view updates while
+  comruvi is running.
+- **Shift+drag** a thumbnail (or the filmstrip / viewer image) into an open
+  ComfyUI browser window to open a tab with the embedded workflow — same as
+  dropping from Explorer or Digikam.
 - In the filmstrip image and separate viewer, scroll the mouse wheel or press
   **Up/Down** to zoom, and drag with the mouse to pan. Press **0** to reset to fit
   window or **1** for 100% (actual-pixel) zoom. Filmstrip mode shows the current
@@ -50,11 +57,14 @@ has been successfully compiled and run on **Windows** and on **Fedora Linux 44**
 
 comruvi creates a readable TOML configuration at
 `~/.config/comruvi/config.toml` (on Windows, `%USERPROFILE%\.config\comruvi\config.toml`).
-It records `version = 0.04`, the last opened folder, `parserdir` (directory of
+It records `version = 0.05`, the last opened folder, `parserdir` (directory of
 translator files), and up to ten favorites as `quick0` through `quick9`; unused
 quick keys are omitted. It also writes the reserved future settings
 `thumbnailsize`, `fonttype`, `fontsize`, and `displaymode`. The lower part of
 the Folders pane provides controls to add, select, and remove favorites.
+
+When an AI image embeds a ComfyUI `workflow` chunk, the info pane offers
+**Copy workflow**.
 
 ## Metadata translators
 
@@ -89,8 +99,9 @@ convention are intentionally compatible with [Geeqie](https://github.com/BestIma
 
 ## Current status
 
-**Alpha 4 (0.04).** Implemented: folder tree with independent scroll, persistent
-favorites, thumbnail grid, filmstrip, background thumbnail generation, modular
-metadata translators (ComfyUI + EXIF photo), JPEG orientation-aware display, and
-a synchronized secondary viewer window with zoom/pan. See
+**Alpha 5 (0.05).** Implemented: folder tree with independent scroll, persistent
+favorites, thumbnail grid, filmstrip, live folder watching, Shift+drag to ComfyUI,
+Home/End navigation, background thumbnail generation, modular metadata
+translators (ComfyUI + EXIF photo), JPEG orientation-aware display, and a
+synchronized secondary viewer window with zoom/pan. See
 [CHANGELOG.md](CHANGELOG.md) for the detailed history.

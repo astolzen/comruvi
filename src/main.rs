@@ -1,12 +1,20 @@
+mod file_drag;
 mod meta_parsers;
 
-use std::{collections::BTreeMap, fs, path::{Path, PathBuf}, sync::mpsc::{self, Receiver}, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::mpsc::{self, Receiver},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result};
 use arboard::Clipboard;
 use eframe::egui::{self, ColorImage, Context as EguiContext, Image, ScrollArea, TextureHandle, TextureOptions, Vec2};
 use image::imageops::FilterType;
 use meta_parsers::{default_parser_dir, exif_orientation, load_parsers, read_metadata, Metadata, ParserConfig};
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 const THUMB_SIZE: u32 = 160;
 
@@ -34,6 +42,16 @@ struct App {
     folder_open: BTreeMap<PathBuf, bool>,
     thumbnail_job: Option<ThumbnailJob>,
     film_view: ViewTransform, viewer_view: ViewTransform,
+    /// When set, start an OS file drag after the UI pass (needs the eframe window handle).
+    pending_file_drag: Option<PathBuf>,
+    /// Scroll the selected thumb into view once (arrow / Home / End navigation only).
+    scroll_selection_into_view: bool,
+    /// Live folder watcher (non-recursive) for the current image folder.
+    folder_watcher: Option<RecommendedWatcher>,
+    folder_events: Option<Receiver<notify::Result<Event>>>,
+    watched_folder: Option<PathBuf>,
+    /// Debounce timer after filesystem events before rescanning images.
+    folder_dirty_since: Option<Instant>,
 }
 struct ThumbnailJob { receiver: Receiver<bool>, completed: usize, total: usize }
 #[derive(Default)]
@@ -85,7 +103,7 @@ impl Config {
         if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
         let quote = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
         let mut contents = format!(
-            "version = 0.04\nthumbnailsize = \"{}\"\nfonttype = \"{}\"\nfontsize = {}\ndisplaymode = \"{}\"\nparserdir = \"{}\"\n",
+            "version = 0.05\nthumbnailsize = \"{}\"\nfonttype = \"{}\"\nfontsize = {}\ndisplaymode = \"{}\"\nparserdir = \"{}\"\n",
             quote(&self.thumbnailsize), quote(&self.fonttype), self.fontsize, quote(&self.displaymode),
             quote(&self.parserdir.to_string_lossy()),
         );
@@ -110,6 +128,8 @@ impl App {
             image_texture: None, metadata: Metadata::default(), notice: parser_notice, config, parsers,
             thumb_columns: 1, thumb_loads_left: 0, folder_children: BTreeMap::new(), folder_open: BTreeMap::new(),
             thumbnail_job: None, film_view: ViewTransform::default(), viewer_view: ViewTransform::default(),
+            pending_file_drag: None, scroll_selection_into_view: false,
+            folder_watcher: None, folder_events: None, watched_folder: None, folder_dirty_since: None,
         };
         app.load_folder();
         // Create/update the config on first launch as well, so every documented
@@ -125,13 +145,90 @@ impl App {
         self.thumbnail_job = None;
         self.folder_children.clear();
         self.entries.clear(); self.selected = None; self.image_texture = None; self.thumb_textures.clear(); self.metadata = Metadata::default();
-        if let Ok(read) = fs::read_dir(&self.folder) {
-            let mut files: Vec<_> = read.flatten().filter_map(|x| {
-                let p = x.path(); is_image(&p).then(|| Entry { name: x.file_name().to_string_lossy().into_owned(), path: p })
-            }).collect();
-            files.sort_by_key(|x| x.name.to_lowercase()); self.entries = files;
+        self.entries = scan_images(&self.folder);
+        self.watched_folder = None; // recreate watcher for the new folder on next frame
+        self.folder_dirty_since = None;
+        self.queue_missing_thumbnails();
+    }
+
+    /// Rescan the current folder without wiping selection or cached thumbnails.
+    fn refresh_entries(&mut self, ctx: &EguiContext) {
+        let selected_path = self.selected_path();
+        let new_entries = scan_images(&self.folder);
+        if new_entries.len() == self.entries.len()
+            && new_entries.iter().zip(self.entries.iter()).all(|(a, b)| a.path == b.path)
+        {
+            return;
+        }
+        let keep: std::collections::BTreeSet<_> = new_entries.iter().map(|e| e.path.clone()).collect();
+        self.thumb_textures.retain(|path, _| keep.contains(path));
+        self.entries = new_entries;
+        match selected_path.and_then(|path| self.entries.iter().position(|entry| entry.path == path)) {
+            Some(index) => self.selected = Some(index),
+            None => {
+                self.selected = None;
+                self.image_texture = None;
+                self.metadata = Metadata::default();
+            }
         }
         self.queue_missing_thumbnails();
+        ctx.request_repaint();
+    }
+
+    /// Watch the open folder for added/removed/renamed images (ignore `.thumbnails`).
+    fn ensure_folder_watch(&mut self, ctx: &EguiContext) {
+        if self.watched_folder.as_ref() == Some(&self.folder) {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let repaint = ctx.clone();
+        let mut watcher = match notify::recommended_watcher(move |event| {
+            let _ = sender.send(event);
+            repaint.request_repaint();
+        }) {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                self.notice = Some(format!("Folder watch unavailable: {error}"));
+                self.folder_watcher = None;
+                self.folder_events = None;
+                self.watched_folder = Some(self.folder.clone());
+                return;
+            }
+        };
+        if let Err(error) = watcher.watch(&self.folder, RecursiveMode::NonRecursive) {
+            self.notice = Some(format!("Could not watch {}: {error}", self.folder.display()));
+            self.folder_watcher = None;
+            self.folder_events = None;
+            self.watched_folder = Some(self.folder.clone());
+            return;
+        }
+        self.folder_watcher = Some(watcher);
+        self.folder_events = Some(receiver);
+        self.watched_folder = Some(self.folder.clone());
+    }
+
+    fn poll_folder_changes(&mut self, ctx: &EguiContext) {
+        let mut dirty = false;
+        if let Some(receiver) = &self.folder_events {
+            while let Ok(message) = receiver.try_recv() {
+                if let Ok(event) = message {
+                    if folder_event_relevant(&event) {
+                        dirty = true;
+                    }
+                }
+            }
+        }
+        if dirty {
+            self.folder_dirty_since = Some(Instant::now());
+        }
+        if let Some(since) = self.folder_dirty_since {
+            if since.elapsed() >= Duration::from_millis(400) {
+                self.folder_dirty_since = None;
+                self.refresh_entries(ctx);
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
     }
     fn tree_children(&mut self, dir: &Path) -> Vec<PathBuf> {
         if let Some(children) = self.folder_children.get(dir) { return children.clone(); }
@@ -205,7 +302,17 @@ impl App {
         let current = self.selected.unwrap_or(0) as isize;
         let last = self.entries.len() as isize - 1;
         let target = (current + direction).clamp(0, last) as usize;
-        if self.selected != Some(target) { self.select(target, ctx); }
+        self.jump_to(target, ctx);
+    }
+    fn jump_to(&mut self, index: usize, ctx: &EguiContext) {
+        if index >= self.entries.len() { return; }
+        if self.selected != Some(index) { self.select(index, ctx); }
+        self.scroll_selection_into_view = true;
+    }
+    fn jump_home(&mut self, ctx: &EguiContext) { self.jump_to(0, ctx); }
+    fn jump_end(&mut self, ctx: &EguiContext) {
+        if self.entries.is_empty() { return; }
+        self.jump_to(self.entries.len() - 1, ctx);
     }
     fn remember_folder(&mut self) {
         self.config.lastfolder = Some(self.folder.clone());
@@ -239,17 +346,40 @@ impl App {
             self.notice = Some(format!("Creating/updating thumbnails ({}/{})", job.completed, job.total));
         }
     }
+    fn selected_path(&self) -> Option<PathBuf> {
+        self.selected.and_then(|index| self.entries.get(index).map(|entry| entry.path.clone()))
+    }
+    /// Queue an OS file drag (drop into ComfyUI to open a tab with embedded workflow).
+    fn queue_file_drag(&mut self, path: PathBuf) {
+        self.pending_file_drag = Some(path);
+    }
+
+    fn run_pending_file_drag(&mut self, frame: &eframe::Frame) {
+        let Some(path) = self.pending_file_drag.take() else { return; };
+        match file_drag::drag_file(frame, &path) {
+            // start_drag blocks until drop/cancel; success means the OS drag loop ran.
+            Ok(()) => self.notice = Some("If you dropped on ComfyUI, a new tab with the workflow should open.".into()),
+            Err(error) => self.notice = Some(error),
+        }
+    }
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &EguiContext, _: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &EguiContext, frame: &mut eframe::Frame) {
         self.thumb_loads_left = 4;
+        self.ensure_folder_watch(ctx);
+        self.poll_folder_changes(ctx);
         self.poll_thumbnail_job();
-        if self.thumbnail_job.is_some() { ctx.request_repaint_after(Duration::from_millis(50)); }
+        if self.thumbnail_job.is_some() {
+            ctx.request_repaint_after(Duration::from_millis(50));
+        }
         // Left/Right move the selection in both modes. Up/Down move by grid row
         // in Thumbnails only — Filmstrip keeps those keys for zoom.
+        // Home/End jump to first/last. Arrow/Home/End also scroll the selection into view.
         if ctx.input(|input| input.key_pressed(egui::Key::ArrowLeft)) { self.navigate(-1, ctx); }
         if ctx.input(|input| input.key_pressed(egui::Key::ArrowRight)) { self.navigate(1, ctx); }
+        if ctx.input(|input| input.key_pressed(egui::Key::Home)) { self.jump_home(ctx); }
+        if ctx.input(|input| input.key_pressed(egui::Key::End)) { self.jump_end(ctx); }
         if self.mode == Mode::Thumbnails {
             let step = self.thumb_columns.max(1) as isize;
             if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) { self.navigate(-step, ctx); }
@@ -322,9 +452,15 @@ impl eframe::App for App {
             });
             if changed { self.load_folder(); self.remember_folder(); }
         }
-        if self.show_info { egui::SidePanel::right("metadata").resizable(true).default_width(330.0).show(ctx, |ui| { metadata_ui(ui, &self.metadata); }); }
+        if self.show_info {
+            egui::SidePanel::right("metadata").resizable(true).default_width(330.0).show(ctx, |ui| {
+                metadata_ui(ui, self);
+            });
+        }
         egui::CentralPanel::default().show(ctx, |ui| match self.mode { Mode::Thumbnails => thumbnails_ui(ui, self, ctx), Mode::Filmstrip => filmstrip_ui(ui, self, ctx) });
         if self.viewer_open { viewer_ui(ctx, self); }
+        // OS drag blocks; run after the egui pass so we still have a valid window handle.
+        self.run_pending_file_drag(frame);
     }
 }
 
@@ -380,9 +516,14 @@ fn folder_tree(ui: &mut egui::Ui, app: &mut App, dir: &Path, changed: &mut bool)
 }
 
 fn thumbnails_ui(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
-    ui.heading(app.folder.display().to_string()); ui.label(format!("{} image(s) · double-click an image to open the separate viewer", app.entries.len()));
+    ui.heading(app.folder.display().to_string());
+    ui.label(format!(
+        "{} image(s) · double-click to open viewer · Shift+drag into ComfyUI",
+        app.entries.len()
+    ));
     let width = ui.available_width(); let columns = (width / 184.0).max(1.0) as usize;
     app.thumb_columns = columns;
+    let scroll_selected = app.scroll_selection_into_view;
     ScrollArea::vertical().show(ui, |ui| {
         egui::Grid::new("thumb-grid").spacing([18.0, 14.0]).show(ui, |ui| {
             for i in 0..app.entries.len() {
@@ -390,50 +531,116 @@ fn thumbnails_ui(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
                 let texture = app.thumbnail(&entry, ctx);
                 ui.vertical(|ui| {
                     let r = if let Some(t) = texture {
-                        ui.add(egui::ImageButton::new(Image::new(&t).fit_to_exact_size(Vec2::splat(160.0))).selected(app.selected == Some(i)))
+                        ui.add(
+                            egui::ImageButton::new(Image::new(&t).fit_to_exact_size(Vec2::splat(160.0)))
+                                .selected(app.selected == Some(i))
+                                .sense(egui::Sense::click_and_drag()),
+                        )
+                        .on_hover_text("Shift+drag into ComfyUI to open the embedded workflow")
                     } else {
-                        ui.button("…")
+                        ui.add(egui::Button::new("…").sense(egui::Sense::click_and_drag()))
                     };
                     if r.clicked() { app.select(i, ctx); }
                     if r.double_clicked() { app.viewer_open = true; }
-                    if app.selected == Some(i) { r.scroll_to_me(Some(egui::Align::Center)); }
+                    let shift = ui.input(|input| input.modifiers.shift);
+                    if shift && r.drag_started() {
+                        app.select(i, ctx);
+                        app.queue_file_drag(entry.path.clone());
+                    }
+                    if scroll_selected && app.selected == Some(i) {
+                        r.scroll_to_me(Some(egui::Align::Center));
+                    }
                     ui.label(egui::RichText::new(entry.name).small());
                 });
                 if (i + 1) % columns == 0 { ui.end_row(); }
             }
         });
     });
+    if scroll_selected { app.scroll_selection_into_view = false; }
 }
 
 fn filmstrip_ui(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
     if app.selected.is_none() && !app.entries.is_empty() { app.select(0, ctx); }
     let image_height = (ui.available_height() - 195.0).max(100.0);
-    if let Some(t) = &app.image_texture { zoomable_image(ui, t, &mut app.film_view, Vec2::new(ui.available_width(), image_height)); }
-    else { ui.allocate_ui(Vec2::new(ui.available_width(), image_height), |ui| { ui.centered_and_justified(|ui| { ui.label("Select an image"); }); }); }
-    ui.separator(); ScrollArea::horizontal().show(ui, |ui| { ui.horizontal(|ui| { for i in 0..app.entries.len() { let e = app.entries[i].clone(); if let Some(t) = app.thumbnail(&e, ctx) { let r = ui.add(egui::ImageButton::new(Image::new(&t).fit_to_exact_size(Vec2::splat(110.0))).selected(app.selected == Some(i))); if r.clicked() { app.select(i, ctx); } if r.double_clicked() { app.viewer_open = true; } if app.selected == Some(i) { r.scroll_to_me(Some(egui::Align::Center)); } } } }); });
+    if let Some(t) = &app.image_texture {
+        if zoomable_image(ui, t, &mut app.film_view, Vec2::new(ui.available_width(), image_height), true) {
+            if let Some(path) = app.selected_path() { app.queue_file_drag(path); }
+        }
+    } else {
+        ui.allocate_ui(Vec2::new(ui.available_width(), image_height), |ui| {
+            ui.centered_and_justified(|ui| { ui.label("Select an image"); });
+        });
+    }
+    ui.separator();
+    let scroll_selected = app.scroll_selection_into_view;
+    ScrollArea::horizontal().show(ui, |ui| {
+        ui.horizontal(|ui| {
+            for i in 0..app.entries.len() {
+                let entry = app.entries[i].clone();
+                if let Some(t) = app.thumbnail(&entry, ctx) {
+                    let r = ui.add(
+                        egui::ImageButton::new(Image::new(&t).fit_to_exact_size(Vec2::splat(110.0)))
+                            .selected(app.selected == Some(i))
+                            .sense(egui::Sense::click_and_drag()),
+                    )
+                    .on_hover_text("Shift+drag into ComfyUI");
+                    if r.clicked() { app.select(i, ctx); }
+                    if r.double_clicked() { app.viewer_open = true; }
+                    let shift = ui.input(|input| input.modifiers.shift);
+                    if shift && r.drag_started() {
+                        app.select(i, ctx);
+                        app.queue_file_drag(entry.path.clone());
+                    }
+                    if scroll_selected && app.selected == Some(i) {
+                        r.scroll_to_me(Some(egui::Align::Center));
+                    }
+                }
+            }
+        });
+    });
+    if scroll_selected { app.scroll_selection_into_view = false; }
 }
 
 fn viewer_ui(ctx: &EguiContext, app: &mut App) {
     let texture = app.image_texture.clone();
     let mut close_requested = false;
+    let mut start_file_drag = false;
     ctx.show_viewport_immediate(
         egui::ViewportId::from_hash_of("separate-viewer"),
         egui::ViewportBuilder::default().with_title("comruvi — viewer").with_inner_size([1000.0, 750.0]),
         |viewer_ctx, _| {
             close_requested = viewer_ctx.input(|input| input.viewport().close_requested());
             egui::CentralPanel::default().show(viewer_ctx, |ui| {
-                if let Some(t) = &texture { zoomable_image(ui, t, &mut app.viewer_view, ui.available_size()); }
-                else { ui.label("Select an image in the main window."); }
+                if let Some(t) = &texture {
+                    if zoomable_image(ui, t, &mut app.viewer_view, ui.available_size(), true) {
+                        start_file_drag = true;
+                    }
+                } else {
+                    ui.label("Select an image in the main window.");
+                }
             });
         },
     );
+    if start_file_drag {
+        if let Some(path) = app.selected_path() { app.queue_file_drag(path); }
+    }
     if close_requested { app.viewer_open = false; }
 }
 
 /// Draw an image into a clipped viewport with independent zoom and pan state.
 /// `None` scale means "fit viewport"; `Some(1.0)` means original pixels.
-fn zoomable_image(ui: &mut egui::Ui, texture: &TextureHandle, view: &mut ViewTransform, desired_size: Vec2) {
+/// Returns true when Shift+drag should start an OS file drag-out (ComfyUI drop).
+fn zoomable_image(
+    ui: &mut egui::Ui,
+    texture: &TextureHandle,
+    view: &mut ViewTransform,
+    desired_size: Vec2,
+    allow_file_drag: bool,
+) -> bool {
     let response = ui.allocate_response(desired_size, egui::Sense::drag());
+    if allow_file_drag {
+        response.clone().on_hover_text("Shift+drag to drop this file into ComfyUI");
+    }
     let source = texture.size_vec2();
     let fit = (response.rect.width() / source.x).min(response.rect.height() / source.y);
     if ui.input(|input| input.key_pressed(egui::Key::Num0)) { view.reset(); }
@@ -444,43 +651,57 @@ fn zoomable_image(ui: &mut egui::Ui, texture: &TextureHandle, view: &mut ViewTra
     if zoom_in || wheel > 0.0 { view.scale = Some(view.scale.unwrap_or(fit) * 1.15); }
     if zoom_out || wheel < 0.0 { view.scale = Some(view.scale.unwrap_or(fit) / 1.15); }
     if let Some(scale) = view.scale { view.scale = Some(scale.clamp(0.02, 32.0)); }
-    if response.dragged() { view.pan += response.drag_delta(); }
+    let shift = ui.input(|input| input.modifiers.shift);
+    let start_file_drag = allow_file_drag && shift && response.drag_started();
+    if response.dragged() && !shift { view.pan += response.drag_delta(); }
     let scale = view.scale.unwrap_or(fit);
     let image_rect = egui::Rect::from_center_size(response.rect.center() + view.pan, source * scale);
     ui.painter().with_clip_rect(response.rect).image(texture.id(), image_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+    start_file_drag
 }
 
-fn metadata_ui(ui: &mut egui::Ui, m: &Metadata) {
+fn metadata_ui(ui: &mut egui::Ui, app: &mut App) {
+    let m = &app.metadata;
     ui.heading("Image information");
     if let Some(parser) = &m.parser {
         ui.label(egui::RichText::new(format!("Parser: {parser}")).small().weak());
     }
+    let has_workflow = m.raw.iter().any(|(key, _)| key.eq_ignore_ascii_case("workflow"));
+    let workflow = m.raw.iter().find(|(key, _)| key.eq_ignore_ascii_case("workflow")).map(|(_, value)| value.clone());
+
     ScrollArea::vertical().show(ui, |ui| {
         // Render translator fields in config order. LoRA rows stay grouped with
         // inactive entries shown in gray ("; inactive)" marker from extractors).
         let mut index = 0;
-        while index < m.fields.len() {
-            let (field, value) = &m.fields[index];
+        while index < app.metadata.fields.len() {
+            let (field, value) = &app.metadata.fields[index];
             if field == "LoRA" || field.eq_ignore_ascii_case("LoRA List") {
                 ui.label(egui::RichText::new("LoRA list").strong());
-                while index < m.fields.len() && (m.fields[index].0 == "LoRA" || m.fields[index].0.eq_ignore_ascii_case("LoRA List")) {
-                    let value = &m.fields[index].1;
+                while index < app.metadata.fields.len()
+                    && (app.metadata.fields[index].0 == "LoRA" || app.metadata.fields[index].0.eq_ignore_ascii_case("LoRA List"))
+                {
+                    let value = app.metadata.fields[index].1.clone();
                     let inactive = value.contains("; inactive)");
                     ui.horizontal_wrapped(|ui| {
-                        if inactive { ui.colored_label(egui::Color32::GRAY, value); }
-                        else { ui.label(value); }
-                        if ui.small_button("Copy").clicked() { copy(value); }
+                        if inactive { ui.colored_label(egui::Color32::GRAY, &value); }
+                        else { ui.label(&value); }
+                        if ui.small_button("Copy").clicked() { copy(&value); }
                     });
                     index += 1;
                 }
                 ui.separator();
                 continue;
             }
-            metadata_field(ui, field, value);
+            let field = field.clone();
+            let value = value.clone();
+            metadata_field(ui, &field, &value);
             index += 1;
         }
-        if let Some((_, workflow)) = m.raw.iter().find(|(key, _)| key.eq_ignore_ascii_case("workflow")) {
-            if ui.button("Copy workflow").clicked() { copy(workflow); }
+        if has_workflow {
+            if let Some(workflow) = &workflow {
+                if ui.button("Copy workflow").clicked() { copy(workflow); }
+            }
+            ui.label(egui::RichText::new("Shift+drag the thumbnail or image into ComfyUI to open the workflow.").small().weak());
             ui.separator();
         }
     });
@@ -491,6 +712,26 @@ fn metadata_field(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.separator();
 }
 fn copy(value: &str) { if let Ok(mut clipboard) = Clipboard::new() { let _ = clipboard.set_text(value); } }
+
+fn scan_images(folder: &Path) -> Vec<Entry> {
+    let Ok(read) = fs::read_dir(folder) else { return Vec::new(); };
+    let mut files: Vec<_> = read.flatten().filter_map(|entry| {
+        let path = entry.path();
+        is_image(&path).then(|| Entry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            path,
+        })
+    }).collect();
+    files.sort_by_key(|entry| entry.name.to_lowercase());
+    files
+}
+
+/// Ignore `.thumbnails` writes; any other change under the watched folder may add/remove images.
+fn folder_event_relevant(event: &Event) -> bool {
+    event.paths.iter().any(|path| {
+        !path.components().any(|component| component.as_os_str() == ".thumbnails")
+    })
+}
 
 fn is_image(p: &Path) -> bool { matches!(p.extension().and_then(|x| x.to_str()).map(|x| x.to_ascii_lowercase()).as_deref(), Some("png" | "jpg" | "jpeg")) }
 fn thumbnail_path(image: &Path) -> PathBuf { image.parent().unwrap_or(Path::new(".")).join(".thumbnails").join(format!("{}.png", image.file_name().unwrap_or_default().to_string_lossy())) }

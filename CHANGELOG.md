@@ -2,11 +2,31 @@
 
 All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
-## 0.04-alpha (Alpha 4) — 2026-10-19
+## 0.05-alpha (Alpha 5) — 2026-10-21
+
+### Added
+
+- **Shift+drag** a thumbnail, filmstrip image, or viewer image into an open
+  ComfyUI browser window to open a new tab with the embedded workflow (same as
+  dropping from Explorer/Digikam).
+- **Home** / **End** jump to the first or last image in Thumbnails and Filmstrip.
+- The current folder is watched so new or removed images update the view while
+  comruvi is running (`.thumbnails` writes are ignored).
 
 ### Changed
 
 - Project license set to **AGPL-3.0** (`LICENSE`, `Cargo.toml`, README).
+- README includes an application screenshot and notes successful builds on
+  **Fedora Linux 44** as well as Windows.
+- Config writes `version = 0.05`.
+
+### Fixed
+
+- Thumbnail view no longer keeps snapping the scroll position back to the
+  selected image while using the mouse wheel; only arrow / Home / End keys
+  scroll the selection into view.
+
+## 0.04-alpha (Alpha 4) — 2026-10-19
 
 ### Fixed
 
