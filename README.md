@@ -2,11 +2,12 @@
 
 **comruvi** (ComfyUI Rust Viewer) is a local-first image browser intended for
 AI-generated images. It shows folders, thumbnail and filmstrip views, and the
-generation metadata embedded in an image. It currently supports PNG and JPEG on
-Windows; the UI and filesystem code are deliberately platform-neutral for a later
-macOS/Linux release.
+generation metadata embedded in an image. It currently supports PNG and JPEG.
+The UI and filesystem code use portable Rust APIs.
 
 comruvi is a fully AI coded Project using both ChatGPT 5.6 and CursorAI.
+
+![comruvi screenshot](Screenshot.png)
 
 ## Install and run
 
@@ -22,9 +23,8 @@ The only files comruvi creates are PNG thumbnails under the selected folder's
 `.thumbnails` directory. Their names follow Geeqie's compatible convention:
 `image.jpg` becomes `.thumbnails/image.jpg.png`.
 
-Supported input formats in this alpha release are PNG, JPG, and JPEG. Builds are
-currently tested on Windows; the application uses portable Rust APIs in preparation
-for macOS and Linux support.
+Supported input formats in this alpha release are PNG, JPG, and JPEG. The project
+has been successfully compiled and run on **Windows** and on **Fedora Linux 44**.
 
 ## Using the viewer
 
