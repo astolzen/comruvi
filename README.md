@@ -30,9 +30,9 @@ powershell -ExecutionPolicy Bypass -File .\installer\pack-windows.ps1
 **MSI:** `dist/comruvi-<version>-windows-x64.msi`
 
 ```powershell
-msiexec /i dist\comruvi-0.0.7-windows-x64.msi
+msiexec /i dist\comruvi-0.0.8-windows-x64.msi
 # quiet, keep existing config/parsers:
-msiexec /i dist\comruvi-0.0.7-windows-x64.msi CONFLICTACTION=Keep /qn
+msiexec /i dist\comruvi-0.0.8-windows-x64.msi CONFLICTACTION=Keep /qn
 ```
 
 The installer shows an early-alpha Accept/Decline warning, then the **AGPL-3.0**
@@ -67,10 +67,14 @@ cargo run --release -- <folder-with-images>
 ```
 
 On Windows PowerShell the same command works. Alternatively, use **Open folder**
-in the app after launch. Original images are never written. The only files
-comruvi creates are PNG thumbnails under the selected folder's `.thumbnails`
-directory. Their names follow Geeqie's compatible convention: `image.jpg`
-becomes `.thumbnails/image.jpg.png`.
+in the app after launch. Original images are never written. Next to the images
+comruvi may create:
+
+- `.thumbnails/` — PNG thumbnails (Geeqie-compatible names: `image.jpg` →
+  `.thumbnails/image.jpg.png`)
+- `.metadata/` — JSON sidecars for generation metadata (`image.png` →
+  `.metadata/image.png.json`), built in the background like thumbnails and
+  rebuilt via **Recreate → Metadata**
 
 Supported input formats in this alpha release are PNG, JPG, and JPEG.
 
@@ -81,6 +85,10 @@ Supported input formats in this alpha release are PNG, JPG, and JPEG.
   separate viewer. If comruvi is already running, that instance switches folder
   and viewer instead of starting a second window. The same path works from the
   command line: `comruvi.exe C:\path\to\image.png`.
+- **Filter** in the toolbar: enter a **volltext** phrase (e.g. `blue eyes`) to show
+  only images whose `.metadata` sidecar contains that phrase
+  (case-insensitive, whole phrase including spaces). **reset** clears the filter.
+  The Filter button stays highlighted while a filter is active.
 - The **Folders** pane is a tree with its own scrollbar. Click a name to open that
   folder; use the chevron controls to expand or collapse. **Up** (with arrow icon)
   moves to the parent. The lower **Favorite places** area provides persistent
@@ -111,7 +119,7 @@ Supported input formats in this alpha release are PNG, JPG, and JPEG.
 
 comruvi creates a readable TOML configuration at
 `~/.config/comruvi/config.toml` (on Windows, `%USERPROFILE%\.config\comruvi\config.toml`).
-It records `version = 0.07`, the last opened folder, `parserdir` (directory of
+It records `version = 0.08`, the last opened folder, `parserdir` (directory of
 translator files), and up to ten favorites as `quick0` through `quick9`; unused
 quick keys are omitted. It also writes the reserved future settings
 `thumbnailsize`, `fonttype`, `fontsize`, and `displaymode`. The lower part of
@@ -150,14 +158,15 @@ comruvi is licensed under the [GNU Affero General Public License v3.0](LICENSE)
 
 No code has been copied from other viewers. The thumbnail layout and filename
 convention are intentionally compatible with [Geeqie](https://github.com/BestImageViewer/geeqie).
+Comruvi is an independed project and not affiliated with ComfyUI. It does neither collect nor upload any telemetry or other user data. 
 
 ## Current status
 
-**Alpha 7 (0.07).** Implemented: folder tree with independent scroll, persistent
+**Alpha 8 (0.08).** Implemented: folder tree with independent scroll, persistent
 favorites, thumbnail grid, filmstrip, live folder watching, Shift+drag to ComfyUI,
-Home/End navigation, background thumbnail generation, modular metadata
-translators (ComfyUI + EXIF photo), JPEG orientation-aware display, a
-synchronized secondary viewer window with zoom/pan, Windows MSI installer
-(alpha warning, AGPL license, config conflict handling), embedded taskbar icon,
-and file-association / single-instance open. See
+Home/End navigation, background thumbnail and `.metadata` cache generation,
+modular metadata translators (ComfyUI + EXIF photo), JPEG orientation-aware
+display, a synchronized secondary viewer window with zoom/pan, Windows MSI
+installer, embedded taskbar icon, file-association / single-instance open, and
+toolbar **Filter** (volltext phrase search). See
 [CHANGELOG.md](CHANGELOG.md) for the detailed history.

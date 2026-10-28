@@ -1,6 +1,6 @@
 [package]
 name = "comruvi"
-version = "0.0.7"
+version = "0.0.8"
 edition = "2024"
 description = "comruvi — ComfyUI Rust Viewer, a local-first image browser for AI generation metadata"
 license = "AGPL-3.0-only"

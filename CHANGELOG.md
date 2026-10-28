@@ -2,6 +2,22 @@
 
 All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
+## 0.08-alpha (Alpha 8) — 2026-10-28
+
+### Added
+
+- Background `.metadata/<filename>.json` sidecars (same lifecycle as thumbnails):
+  auto-fill for missing/stale entries, toolbar progress, and **Recreate → Metadata**.
+- Toolbar **Recreate** menu replaces the old “Recreate thumbnails” button
+  (options: Thumbnails, Metadata).
+- Toolbar **Filter** menu: **reset**, **volltext** phrase search (case-insensitive,
+  contiguous match including spaces) against `.metadata` sidecars; button highlights
+  like Thumbnails/Filmstrip while a filter is active.
+
+### Changed
+
+- Config writes `version = 0.08`.
+
 ## 0.07-alpha (Alpha 7) — 2026-10-28
 
 ### Added

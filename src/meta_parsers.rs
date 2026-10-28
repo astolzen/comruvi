@@ -2,12 +2,21 @@
 //!
 //! Files live under `parserdir` (default `~/.config/comruvi/parsers`) as TOML.
 //! Each file has a trigger that selects it, then a list of display fields.
+//!
+//! Per-folder caches live next to images under `.metadata/<filename>.json`
+//! (same idea as `.thumbnails/`).
 
-use std::{collections::BTreeMap, fs, io::BufReader, path::{Path, PathBuf}};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::BufReader,
+    path::{Path, PathBuf},
+    time::UNIX_EPOCH,
+};
 
 use anyhow::{Context, Result};
 use exif::{In, Reader as ExifReader, Tag, Value as ExifValue};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -89,6 +98,158 @@ impl Metadata {
     pub fn error(e: String) -> Self {
         Self { fields: vec![("Error".into(), e)], raw: vec![], parser: None }
     }
+}
+
+/// On-disk sidecar written under `.metadata/` for fast future filtering.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedImageMeta {
+    pub version: u32,
+    pub source_mtime: u64,
+    pub source_size: u64,
+    pub parser: Option<String>,
+    pub fields: Vec<(String, String)>,
+    /// Convenience copies for filters (derived from `fields`).
+    #[serde(default)]
+    pub positive: Option<String>,
+    #[serde(default)]
+    pub negative: Option<String>,
+    #[serde(default)]
+    pub loras: Vec<String>,
+}
+
+pub const METADATA_CACHE_VERSION: u32 = 1;
+
+/// `.metadata/<filename>.json` next to the image (Geeqie-style sidecar layout).
+pub fn metadata_cache_path(image: &Path) -> PathBuf {
+    let name = image
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".into());
+    image
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(".metadata")
+        .join(format!("{name}.json"))
+}
+
+fn source_stamp(path: &Path) -> Result<(u64, u64)> {
+    let meta = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let mtime = meta
+        .modified()
+        .with_context(|| format!("mtime {}", path.display()))?
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    Ok((mtime, meta.len()))
+}
+
+fn field_value<'a>(fields: &'a [(String, String)], label: &str) -> Option<&'a str> {
+    fields
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(label))
+        .map(|(_, value)| value.as_str())
+}
+
+fn derive_loras(fields: &[(String, String)]) -> Vec<String> {
+    fields
+        .iter()
+        .filter(|(key, _)| key == "LoRA" || key.eq_ignore_ascii_case("LoRA List"))
+        .map(|(_, value)| {
+            value
+                .split(" (")
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .to_string()
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// True when no cache exists, version mismatches, or the image changed on disk.
+pub fn metadata_cache_is_stale(image: &Path) -> bool {
+    let cache = metadata_cache_path(image);
+    let Ok(text) = fs::read_to_string(&cache) else {
+        return true;
+    };
+    let Ok(cached) = serde_json::from_str::<CachedImageMeta>(&text) else {
+        return true;
+    };
+    if cached.version != METADATA_CACHE_VERSION {
+        return true;
+    }
+    match source_stamp(image) {
+        Ok((mtime, size)) => cached.source_mtime != mtime || cached.source_size != size,
+        Err(_) => true,
+    }
+}
+
+/// Load a `.metadata` sidecar if present and parseable.
+pub fn load_cached_image_meta(image: &Path) -> Option<CachedImageMeta> {
+    let text = fs::read_to_string(metadata_cache_path(image)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+impl CachedImageMeta {
+    /// Lowercased blob used for case-insensitive phrase search (volltext filter).
+    pub fn search_blob_lower(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(parser) = &self.parser {
+            parts.push(parser.clone());
+        }
+        if let Some(positive) = &self.positive {
+            parts.push(positive.clone());
+        }
+        if let Some(negative) = &self.negative {
+            parts.push(negative.clone());
+        }
+        for lora in &self.loras {
+            parts.push(lora.clone());
+        }
+        for (key, value) in &self.fields {
+            parts.push(key.clone());
+            parts.push(value.clone());
+        }
+        parts.join("\n").to_ascii_lowercase()
+    }
+}
+
+/// Case-insensitive contiguous phrase match against cached metadata (and file name).
+pub fn image_matches_volltext(image: &Path, file_name: &str, needle_lower: &str) -> bool {
+    if needle_lower.is_empty() {
+        return true;
+    }
+    if file_name.to_ascii_lowercase().contains(needle_lower) {
+        return true;
+    }
+    load_cached_image_meta(image)
+        .map(|cached| cached.search_blob_lower().contains(needle_lower))
+        .unwrap_or(false)
+}
+
+/// Extract translator fields for `image` and write `.metadata/<name>.json`.
+pub fn write_image_metadata_cache(image: &Path, parsers: &[ParserConfig]) -> Result<PathBuf> {
+    let (mtime, size) = source_stamp(image)?;
+    let meta = read_metadata(image, parsers)?;
+    let cached = CachedImageMeta {
+        version: METADATA_CACHE_VERSION,
+        source_mtime: mtime,
+        source_size: size,
+        parser: meta.parser.clone(),
+        positive: field_value(&meta.fields, "Positive prompt").map(str::to_string),
+        negative: field_value(&meta.fields, "Negative prompt").map(str::to_string),
+        loras: derive_loras(&meta.fields),
+        fields: meta.fields,
+    };
+    let dest = metadata_cache_path(image);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(&cached)
+        .context("serialize metadata cache")?;
+    fs::write(&dest, json).with_context(|| format!("writing {}", dest.display()))?;
+    Ok(dest)
 }
 
 const DEFAULT_PARSERS: &[(&str, &str)] = &[

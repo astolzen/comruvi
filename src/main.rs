@@ -16,7 +16,10 @@ use anyhow::{Context, Result};
 use arboard::Clipboard;
 use eframe::egui::{self, ColorImage, Context as EguiContext, Image, ScrollArea, TextureHandle, TextureOptions, Vec2};
 use image::imageops::FilterType;
-use meta_parsers::{default_parser_dir, exif_orientation, load_parsers, read_metadata, Metadata, ParserConfig};
+use meta_parsers::{
+    default_parser_dir, exif_orientation, image_matches_volltext, load_parsers,
+    metadata_cache_is_stale, read_metadata, write_image_metadata_cache, Metadata, ParserConfig,
+};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 const THUMB_SIZE: u32 = 160;
@@ -176,7 +179,12 @@ fn app_icon_arc() -> std::sync::Arc<egui::IconData> {
 struct Entry { path: PathBuf, name: String }
 
 struct App {
-    folder: PathBuf, tree_root: PathBuf, entries: Vec<Entry>, selected: Option<usize>, mode: Mode,
+    folder: PathBuf, tree_root: PathBuf,
+    /// All images in the folder (unfiltered).
+    all_entries: Vec<Entry>,
+    /// Visible images after the active view filter.
+    entries: Vec<Entry>,
+    selected: Option<usize>, mode: Mode,
     show_tree: bool, show_info: bool, viewer_open: bool, about_open: bool,
     thumb_textures: BTreeMap<PathBuf, TextureHandle>,
     image_texture: Option<TextureHandle>, about_icon: Option<TextureHandle>,
@@ -190,7 +198,8 @@ struct App {
     folder_children: BTreeMap<PathBuf, Vec<PathBuf>>,
     /// Manual expand/collapse overrides for tree nodes (true=open, false=closed).
     folder_open: BTreeMap<PathBuf, bool>,
-    thumbnail_job: Option<ThumbnailJob>,
+    thumbnail_job: Option<BackgroundJob>,
+    metadata_job: Option<BackgroundJob>,
     film_view: ViewTransform, viewer_view: ViewTransform,
     /// When set, start an OS file drag after the UI pass (needs the eframe window handle).
     pending_file_drag: Option<PathBuf>,
@@ -206,8 +215,26 @@ struct App {
     _instance: single_instance::SingleInstance,
     /// Image/folder to open once egui context is available (CLI / file association).
     pending_external_open: Option<PathBuf>,
+    /// Active view filters (volltext phrase, …).
+    view_filter: ViewFilter,
 }
-struct ThumbnailJob { receiver: Receiver<bool>, completed: usize, total: usize }
+
+#[derive(Default, Clone)]
+struct ViewFilter {
+    /// Contiguous phrase; empty means no volltext filter. Matching is case-insensitive.
+    volltext: String,
+}
+
+impl ViewFilter {
+    fn is_active(&self) -> bool {
+        !self.volltext.trim().is_empty()
+    }
+
+    fn reset(&mut self) {
+        self.volltext.clear();
+    }
+}
+struct BackgroundJob { receiver: Receiver<bool>, completed: usize, total: usize }
 #[derive(Default)]
 struct ViewTransform { scale: Option<f32>, pan: Vec2 }
 impl ViewTransform { fn reset(&mut self) { self.scale = None; self.pan = Vec2::ZERO; } }
@@ -295,16 +322,19 @@ impl App {
             Err(error) => (Vec::new(), Some(format!("Could not load parsers: {error}"))),
         };
         let mut app = Self {
-            tree_root: folder.clone(), folder, entries: vec![], selected: None, mode: Mode::Thumbnails,
+            tree_root: folder.clone(), folder,
+            all_entries: vec![], entries: vec![], selected: None, mode: Mode::Thumbnails,
             show_tree: true, show_info: true, viewer_open: false, about_open: false,
             thumb_textures: BTreeMap::new(),
             image_texture: None, about_icon: None, metadata: Metadata::default(), notice: parser_notice, config, parsers,
             thumb_columns: 1, thumb_loads_left: 0, folder_children: BTreeMap::new(), folder_open: BTreeMap::new(),
-            thumbnail_job: None, film_view: ViewTransform::default(), viewer_view: ViewTransform::default(),
+            thumbnail_job: None, metadata_job: None,
+            film_view: ViewTransform::default(), viewer_view: ViewTransform::default(),
             pending_file_drag: None, scroll_selection_into_view: false,
             folder_watcher: None, folder_events: None, watched_folder: None, folder_dirty_since: None,
             _instance: instance,
             pending_external_open,
+            view_filter: ViewFilter::default(),
         };
         app.load_folder();
         // Create/update the config on first launch as well, so every documented
@@ -342,6 +372,19 @@ impl App {
             self.remember_folder();
         }
         self.mode = Mode::Thumbnails;
+        // Shell opens should show the image even if a view filter would hide it.
+        if self.view_filter.is_active()
+            && !self
+                .entries
+                .iter()
+                .any(|entry| paths_equal(&entry.path, &path))
+            && self
+                .all_entries
+                .iter()
+                .any(|entry| paths_equal(&entry.path, &path))
+        {
+            self.reset_view_filter(ctx);
+        }
         if let Some(index) = self.entries.iter().position(|entry| paths_equal(&entry.path, &path)) {
             if self.selected != Some(index) {
                 self.select(index, ctx);
@@ -373,39 +416,97 @@ impl App {
         // Without this, rapid folder switches leave intermediate folders unqueued
         // until the old job finishes — only the last folder gets a fresh job.
         self.thumbnail_job = None;
+        self.metadata_job = None;
         self.folder_children.clear();
-        self.entries.clear(); self.selected = None; self.image_texture = None; self.thumb_textures.clear(); self.metadata = Metadata::default();
-        self.entries = scan_images(&self.folder);
+        self.all_entries.clear();
+        self.entries.clear();
+        self.selected = None;
+        self.image_texture = None;
+        self.thumb_textures.clear();
+        self.metadata = Metadata::default();
+        self.all_entries = scan_images(&self.folder);
+        self.apply_view_filter(None);
         self.watched_folder = None; // recreate watcher for the new folder on next frame
         self.folder_dirty_since = None;
         self.queue_missing_thumbnails();
+        self.queue_missing_metadata();
     }
 
     /// Rescan the current folder without wiping selection or cached thumbnails.
     fn refresh_entries(&mut self, ctx: &EguiContext) {
         let selected_path = self.selected_path();
         let new_entries = scan_images(&self.folder);
-        if new_entries.len() == self.entries.len()
-            && new_entries.iter().zip(self.entries.iter()).all(|(a, b)| a.path == b.path)
+        if new_entries.len() == self.all_entries.len()
+            && new_entries
+                .iter()
+                .zip(self.all_entries.iter())
+                .all(|(a, b)| a.path == b.path)
         {
             return;
         }
         let keep: std::collections::BTreeSet<_> = new_entries.iter().map(|e| e.path.clone()).collect();
         self.thumb_textures.retain(|path, _| keep.contains(path));
-        self.entries = new_entries;
-        match selected_path.and_then(|path| self.entries.iter().position(|entry| entry.path == path)) {
-            Some(index) => self.selected = Some(index),
-            None => {
+        self.all_entries = new_entries;
+        self.apply_view_filter(Some(ctx));
+        if let Some(path) = selected_path {
+            if let Some(index) = self.entries.iter().position(|entry| entry.path == path) {
+                self.selected = Some(index);
+            } else {
                 self.selected = None;
                 self.image_texture = None;
                 self.metadata = Metadata::default();
             }
         }
         self.queue_missing_thumbnails();
+        self.queue_missing_metadata();
         ctx.request_repaint();
     }
 
-    /// Watch the open folder for added/removed/renamed images (ignore `.thumbnails`).
+    fn apply_view_filter(&mut self, ctx: Option<&EguiContext>) {
+        let selected_path = self.selected_path();
+        let needle = self.view_filter.volltext.trim().to_ascii_lowercase();
+        if needle.is_empty() {
+            self.entries = self.all_entries.clone();
+        } else {
+            self.entries = self
+                .all_entries
+                .iter()
+                .filter(|entry| image_matches_volltext(&entry.path, &entry.name, &needle))
+                .cloned()
+                .collect();
+        }
+        if let Some(path) = selected_path {
+            if let Some(index) = self
+                .entries
+                .iter()
+                .position(|entry| paths_equal(&entry.path, &path))
+            {
+                self.selected = Some(index);
+            } else if let Some(ctx) = ctx {
+                if self.entries.is_empty() {
+                    self.selected = None;
+                    self.image_texture = None;
+                    self.metadata = Metadata::default();
+                    self.viewer_open = false;
+                } else {
+                    self.select(0, ctx);
+                }
+            } else {
+                self.selected = None;
+                self.image_texture = None;
+                self.metadata = Metadata::default();
+            }
+        } else if self.selected.is_some() && self.selected.map(|i| i >= self.entries.len()).unwrap_or(false) {
+            self.selected = None;
+        }
+    }
+
+    fn reset_view_filter(&mut self, ctx: &EguiContext) {
+        self.view_filter.reset();
+        self.apply_view_filter(Some(ctx));
+    }
+
+    /// Watch the open folder for added/removed/renamed images (ignore cache dirs).
     fn ensure_folder_watch(&mut self, ctx: &EguiContext) {
         if self.watched_folder.as_ref() == Some(&self.folder) {
             return;
@@ -464,7 +565,12 @@ impl App {
         if let Some(children) = self.folder_children.get(dir) { return children.clone(); }
         let mut children: Vec<_> = fs::read_dir(dir).into_iter().flatten().flatten()
             .map(|entry| entry.path())
-            .filter(|path| path.is_dir() && path.file_name().is_some_and(|name| name != ".thumbnails"))
+            .filter(|path| {
+                path.is_dir()
+                    && path.file_name().is_some_and(|name| {
+                        name != ".thumbnails" && name != ".metadata"
+                    })
+            })
             .collect();
         children.sort_by(|a, b| {
             let an = a.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
@@ -500,13 +606,35 @@ impl App {
     }
     fn recreate_thumbnails(&mut self) {
         if self.thumbnail_job.is_some() { return; }
-        let paths: Vec<_> = self.entries.iter().map(|entry| entry.path.clone()).collect();
+        let paths: Vec<_> = self.all_entries.iter().map(|entry| entry.path.clone()).collect();
         self.start_thumbnail_job(paths, true);
+    }
+    fn recreate_metadata(&mut self) {
+        if self.metadata_job.is_some() { return; }
+        let paths: Vec<_> = self.all_entries.iter().map(|entry| entry.path.clone()).collect();
+        self.start_metadata_job(paths);
     }
     fn queue_missing_thumbnails(&mut self) {
         if self.thumbnail_job.is_some() { return; }
-        let paths: Vec<_> = self.entries.iter().filter(|entry| !thumbnail_path(&entry.path).exists()).map(|entry| entry.path.clone()).collect();
+        let paths: Vec<_> = self
+            .all_entries
+            .iter()
+            .filter(|entry| !thumbnail_path(&entry.path).exists())
+            .map(|entry| entry.path.clone())
+            .collect();
         if !paths.is_empty() { self.start_thumbnail_job(paths, false); }
+    }
+    fn queue_missing_metadata(&mut self) {
+        if self.metadata_job.is_some() { return; }
+        let paths: Vec<_> = self
+            .all_entries
+            .iter()
+            .filter(|entry| metadata_cache_is_stale(&entry.path))
+            .map(|entry| entry.path.clone())
+            .collect();
+        if !paths.is_empty() {
+            self.start_metadata_job(paths);
+        }
     }
     fn start_thumbnail_job(&mut self, paths: Vec<PathBuf>, clear_all_textures: bool) {
         let total = paths.len();
@@ -524,8 +652,25 @@ impl App {
         } else {
             for path in &paths { self.thumb_textures.remove(path); }
         }
-        self.notice = Some(format!("Creating/updating thumbnails (0/{total})"));
-        self.thumbnail_job = Some(ThumbnailJob { receiver, completed: 0, total });
+        self.thumbnail_job = Some(BackgroundJob { receiver, completed: 0, total });
+        self.refresh_job_notice();
+    }
+    fn start_metadata_job(&mut self, paths: Vec<PathBuf>) {
+        let total = paths.len();
+        if total == 0 { return; }
+        let (sender, receiver) = mpsc::channel();
+        let job_paths = paths;
+        let parsers = self.parsers.clone();
+        std::thread::spawn(move || {
+            for path in job_paths {
+                let succeeded = write_image_metadata_cache(&path, &parsers).is_ok();
+                if sender.send(succeeded).is_err() {
+                    break;
+                }
+            }
+        });
+        self.metadata_job = Some(BackgroundJob { receiver, completed: 0, total });
+        self.refresh_job_notice();
     }
     fn navigate(&mut self, direction: isize, ctx: &EguiContext) {
         if self.entries.is_empty() { return; }
@@ -565,15 +710,54 @@ impl App {
         self.load_folder();
         self.remember_folder();
     }
-    fn poll_thumbnail_job(&mut self) {
-        let Some(job) = &mut self.thumbnail_job else { return; };
-        while job.receiver.try_recv().is_ok() { job.completed += 1; }
-        if job.completed >= job.total {
-            self.notice = Some(format!("Thumbnail update finished ({} images).", job.total));
+    fn poll_background_jobs(&mut self) {
+        let mut thumb_done = false;
+        let mut meta_done = false;
+        if let Some(job) = &mut self.thumbnail_job {
+            while job.receiver.try_recv().is_ok() {
+                job.completed += 1;
+            }
+            if job.completed >= job.total {
+                thumb_done = true;
+            }
+        }
+        if let Some(job) = &mut self.metadata_job {
+            while job.receiver.try_recv().is_ok() {
+                job.completed += 1;
+            }
+            if job.completed >= job.total {
+                meta_done = true;
+            }
+        }
+        if thumb_done {
+            let total = self.thumbnail_job.as_ref().map(|j| j.total).unwrap_or(0);
             self.thumbnail_job = None;
+            self.notice = Some(format!("Thumbnail update finished ({total} images)."));
             self.queue_missing_thumbnails();
-        } else {
-            self.notice = Some(format!("Creating/updating thumbnails ({}/{})", job.completed, job.total));
+        }
+        if meta_done {
+            let total = self.metadata_job.as_ref().map(|j| j.total).unwrap_or(0);
+            self.metadata_job = None;
+            self.notice = Some(format!("Metadata cache update finished ({total} images)."));
+            // New sidecars may change which images match the active filter.
+            self.apply_view_filter(None);
+            self.queue_missing_metadata();
+        }
+        if self.thumbnail_job.is_some() || self.metadata_job.is_some() {
+            self.refresh_job_notice();
+        }
+    }
+
+    fn refresh_job_notice(&mut self) {
+        let mut parts = Vec::new();
+        if let Some(job) = &self.thumbnail_job {
+            parts.push(format!("Thumbnails ({}/{})", job.completed, job.total));
+        }
+        if let Some(job) = &self.metadata_job {
+            parts.push(format!("Metadata ({}/{})", job.completed, job.total));
+        }
+        if !parts.is_empty() {
+            self.notice = Some(format!("Creating/updating {}", parts.join(" · ")));
         }
     }
     fn selected_path(&self) -> Option<PathBuf> {
@@ -600,8 +784,8 @@ impl eframe::App for App {
         self.poll_open_requests(ctx);
         self.ensure_folder_watch(ctx);
         self.poll_folder_changes(ctx);
-        self.poll_thumbnail_job();
-        if self.thumbnail_job.is_some() {
+        self.poll_background_jobs();
+        if self.thumbnail_job.is_some() || self.metadata_job.is_some() {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
         // Left/Right move the selection in both modes. Up/Down move by grid row
@@ -632,10 +816,66 @@ impl eframe::App for App {
                 {
                     self.go_up();
                 }
-                let recreate = ui.add_enabled_ui(self.thumbnail_job.is_none(), |ui| {
-                    ui_icons::icon_text_button(ui, ui_icons::Icon::Refresh, "Recreate thumbnails")
+                ui.menu_button("Recreate", |ui| {
+                    let thumbs_busy = self.thumbnail_job.is_some();
+                    let meta_busy = self.metadata_job.is_some();
+                    if ui
+                        .add_enabled(!thumbs_busy, egui::Button::new("Thumbnails"))
+                        .on_hover_text("Rebuild .thumbnails for every image in this folder")
+                        .clicked()
+                    {
+                        self.recreate_thumbnails();
+                        ui.close_menu();
+                    }
+                    if ui
+                        .add_enabled(!meta_busy, egui::Button::new("Metadata"))
+                        .on_hover_text("Rebuild .metadata/*.json sidecars for every image in this folder")
+                        .clicked()
+                    {
+                        self.recreate_metadata();
+                        ui.close_menu();
+                    }
                 });
-                if recreate.inner.clicked() { self.recreate_thumbnails(); }
+                {
+                    let filter_active = self.view_filter.is_active();
+                    let mut filter_changed = false;
+                    let filter_button = egui::Button::new("Filter").selected(filter_active);
+                    egui::menu::menu_custom_button(ui, filter_button, |ui| {
+                        if ui
+                            .add_enabled(filter_active, egui::Button::new("reset"))
+                            .on_hover_text("Clear all view filters")
+                            .clicked()
+                        {
+                            self.view_filter.reset();
+                            filter_changed = true;
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        ui.label("volltext");
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(&mut self.view_filter.volltext)
+                                .desired_width(220.0)
+                                .hint_text("blue eyes"),
+                        );
+                        if edit.changed() {
+                            filter_changed = true;
+                        }
+                        if filter_active {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} / {} images",
+                                    self.entries.len(),
+                                    self.all_entries.len()
+                                ))
+                                .small()
+                                .weak(),
+                            );
+                        }
+                    });
+                    if filter_changed {
+                        self.apply_view_filter(Some(ctx));
+                    }
+                }
                 ui.separator(); ui.checkbox(&mut self.show_tree, "Folders"); ui.checkbox(&mut self.show_info, "Info"); ui.separator();
                 ui.selectable_value(&mut self.mode, Mode::Thumbnails, "Thumbnails"); ui.selectable_value(&mut self.mode, Mode::Filmstrip, "Filmstrip");
                 if self.mode == Mode::Filmstrip {
@@ -646,7 +886,9 @@ impl eframe::App for App {
                     ui.separator();
                     ui.label(zoom);
                 }
-                if self.thumbnail_job.is_some() { ui.add(egui::Spinner::new()); }
+                if self.thumbnail_job.is_some() || self.metadata_job.is_some() {
+                    ui.add(egui::Spinner::new());
+                }
                 if let Some(n) = &self.notice { ui.label(n); }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("About").clicked() { self.about_open = true; }
@@ -1023,10 +1265,13 @@ fn scan_images(folder: &Path) -> Vec<Entry> {
     files
 }
 
-/// Ignore `.thumbnails` writes; any other change under the watched folder may add/remove images.
+/// Ignore cache-dir writes; any other change under the watched folder may add/remove images.
 fn folder_event_relevant(event: &Event) -> bool {
     event.paths.iter().any(|path| {
-        !path.components().any(|component| component.as_os_str() == ".thumbnails")
+        !path.components().any(|component| {
+            let name = component.as_os_str();
+            name == ".thumbnails" || name == ".metadata"
+        })
     })
 }
 
