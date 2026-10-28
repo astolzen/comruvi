@@ -30,9 +30,9 @@ powershell -ExecutionPolicy Bypass -File .\installer\pack-windows.ps1
 **MSI:** `dist/comruvi-<version>-windows-x64.msi`
 
 ```powershell
-msiexec /i dist\comruvi-0.0.6-windows-x64.msi
+msiexec /i dist\comruvi-0.0.7-windows-x64.msi
 # quiet, keep existing config/parsers:
-msiexec /i dist\comruvi-0.0.6-windows-x64.msi CONFLICTACTION=Keep /qn
+msiexec /i dist\comruvi-0.0.7-windows-x64.msi CONFLICTACTION=Keep /qn
 ```
 
 The installer shows an early-alpha Accept/Decline warning, then the **AGPL-3.0**
@@ -55,6 +55,10 @@ config/parsers).
 
 ### macOS and Linux (and Windows from source)
 
+The package version lives in the repo-root [`VERSION`](VERSION) file (About dialog,
+config.toml, and the Windows installer scripts all read it). Bump that file when
+cutting a release; `build.rs` keeps `Cargo.toml` in sync.
+
 Install the current stable Rust toolchain from [rustup](https://rustup.rs/), then
 clone or download this project and run:
 
@@ -72,6 +76,11 @@ Supported input formats in this alpha release are PNG, JPG, and JPEG.
 
 ## Using the viewer
 
+- On Windows you can set comruvi as the default app for PNG/JPEG. Double-click or
+  **Open with** opens the file's folder in **Thumbnails** and the image in the
+  separate viewer. If comruvi is already running, that instance switches folder
+  and viewer instead of starting a second window. The same path works from the
+  command line: `comruvi.exe C:\path\to\image.png`.
 - The **Folders** pane is a tree with its own scrollbar. Click a name to open that
   folder; use the chevron controls to expand or collapse. **Up** (with arrow icon)
   moves to the parent. The lower **Favorite places** area provides persistent
@@ -102,7 +111,7 @@ Supported input formats in this alpha release are PNG, JPG, and JPEG.
 
 comruvi creates a readable TOML configuration at
 `~/.config/comruvi/config.toml` (on Windows, `%USERPROFILE%\.config\comruvi\config.toml`).
-It records `version = 0.06`, the last opened folder, `parserdir` (directory of
+It records `version = 0.07`, the last opened folder, `parserdir` (directory of
 translator files), and up to ten favorites as `quick0` through `quick9`; unused
 quick keys are omitted. It also writes the reserved future settings
 `thumbnailsize`, `fonttype`, `fontsize`, and `displaymode`. The lower part of
@@ -144,10 +153,11 @@ convention are intentionally compatible with [Geeqie](https://github.com/BestIma
 
 ## Current status
 
-**Alpha 6 (0.06).** Implemented: folder tree with independent scroll, persistent
+**Alpha 7 (0.07).** Implemented: folder tree with independent scroll, persistent
 favorites, thumbnail grid, filmstrip, live folder watching, Shift+drag to ComfyUI,
 Home/End navigation, background thumbnail generation, modular metadata
 translators (ComfyUI + EXIF photo), JPEG orientation-aware display, a
-synchronized secondary viewer window with zoom/pan, and a Windows MSI installer
-(alpha warning, AGPL license, config conflict handling). See
+synchronized secondary viewer window with zoom/pan, Windows MSI installer
+(alpha warning, AGPL license, config conflict handling), embedded taskbar icon,
+and file-association / single-instance open. See
 [CHANGELOG.md](CHANGELOG.md) for the detailed history.

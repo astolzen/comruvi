@@ -65,6 +65,7 @@ if (-not $NoStartMenu) {
     $shortcut.TargetPath = $ExePath
     $shortcut.WorkingDirectory = $BinDir
     $shortcut.Description = "comruvi - ComfyUI Rust Viewer"
+    $shortcut.IconLocation = "$ExePath,0"
     $shortcut.Save()
     Write-Host "  Start Menu shortcut: $lnk"
 }
@@ -76,6 +77,7 @@ if ($DesktopShortcut) {
     $shortcut.TargetPath = $ExePath
     $shortcut.WorkingDirectory = $BinDir
     $shortcut.Description = "comruvi - ComfyUI Rust Viewer"
+    $shortcut.IconLocation = "$ExePath,0"
     $shortcut.Save()
     Write-Host "  Desktop shortcut: $lnk"
 }

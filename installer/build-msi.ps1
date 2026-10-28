@@ -12,12 +12,8 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
 
-$CargoToml = Get-Content (Join-Path $Root "Cargo.toml") -Raw
-if ($CargoToml -match 'version\s*=\s*"([^"]+)"') {
-    $Version = $Matches[1]
-} else {
-    throw "Could not read version from Cargo.toml"
-}
+. (Join-Path $Root "installer\ComruviVersion.ps1")
+$Version = Get-ComruviVersion -Root $Root
 
 # WiX ProductVersion requires up to 3 numeric fields (major.minor.patch).
 $MsiVersion = $Version
@@ -25,9 +21,20 @@ if ($Version -match '^(\d+)\.(\d+)\.(\d+)') {
     $MsiVersion = "$($Matches[1]).$($Matches[2]).$($Matches[3])"
 }
 
+$WixDir = Join-Path $Root "installer\wix"
+$IconBmp = Join-Path $WixDir "comruvi-icon.bmp"
+$IconIco = Join-Path $Root "comruvi.ico"
+
+# Icons first so build.rs can embed comruvi.ico into the PE.
+Write-Host "Exporting icon BMP/ICO..."
+cargo run --release --bin export-icon -- $IconBmp
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $IconBmp) -or -not (Test-Path -LiteralPath $IconIco)) {
+    throw "Failed to export icon assets ($IconBmp / $IconIco)"
+}
+
 if (-not $SkipBuild) {
-    Write-Host "Building release binary..."
-    cargo build --release
+    Write-Host "Building release binary (GUI subsystem + embedded icon)..."
+    cargo build --release --bin comruvi
     if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed" }
 }
 
@@ -53,7 +60,6 @@ if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne $null) {
     Write-Host "  (extension add exit $LASTEXITCODE - continuing)"
 }
 
-$WixDir = Join-Path $Root "installer\wix"
 $DistRoot = Join-Path $Root "dist"
 New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
 
@@ -101,13 +107,6 @@ $rtf = "{\rtf1\ansi\ansicpg1252\deff0{\fonttbl{\f0\fmodern\fcharset0 Courier New
 [IO.File]::WriteAllText($LicenseRtf, $rtf, [Text.UTF8Encoding]::new($false))
 Write-Host "Wrote AGPL License.rtf"
 
-$IconBmp = Join-Path $WixDir "comruvi-icon.bmp"
-Write-Host "Exporting icon BMP for warning dialog..."
-cargo run --release --bin export-icon -- $IconBmp
-if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $IconBmp)) {
-    throw "Failed to export $IconBmp"
-}
-
 Write-Host "Building MSI $OutMsi ..."
 wix build `
     (Join-Path $WixDir "Package.wxs") `
@@ -121,6 +120,7 @@ wix build `
     -d "VersionFile=$VersionFile" `
     -d "LicenseRtf=$LicenseRtf" `
     -d "IconBmp=$IconBmp" `
+    -d "IconIco=$IconIco" `
     -d "AskConflictVbs=$(Join-Path $WixDir 'AskConflict.vbs')" `
     -o $OutMsi
 if ($LASTEXITCODE -ne 0) { throw "wix build failed" }

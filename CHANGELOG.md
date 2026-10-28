@@ -2,6 +2,22 @@
 
 All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
+## 0.07-alpha (Alpha 7) — 2026-10-28
+
+### Added
+
+- Open via file association / CLI path: show the image's folder in Thumbnails,
+  open the image in the separate viewer; if comruvi is already running, hand the
+  path to that instance (single-instance).
+- `comruvi.ico` embedded in the PE (and Start Menu shortcuts) so pinning to the
+  taskbar shows the comruvi icon.
+- Repo-root `VERSION` file as single source of truth (About, config.toml,
+  MSI/zip); `build.rs` syncs `Cargo.toml`.
+
+### Changed
+
+- Config writes `version = 0.07`.
+
 ## 0.06-alpha (Alpha 6) — 2026-10-28
 
 ### Added

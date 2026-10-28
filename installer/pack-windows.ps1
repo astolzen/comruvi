@@ -12,16 +12,18 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $Root
 
-$CargoToml = Get-Content (Join-Path $Root "Cargo.toml") -Raw
-if ($CargoToml -match 'version\s*=\s*"([^"]+)"') {
-    $Version = $Matches[1]
-} else {
-    throw "Could not read version from Cargo.toml"
+. (Join-Path $Root "installer\ComruviVersion.ps1")
+$Version = Get-ComruviVersion -Root $Root
+
+Write-Host "Exporting icon BMP/ICO..."
+cargo run --release --bin export-icon -- (Join-Path $Root "installer\wix\comruvi-icon.bmp")
+if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath (Join-Path $Root "comruvi.ico"))) {
+    throw "Failed to export comruvi.ico"
 }
 
 if (-not $SkipBuild) {
-    Write-Host "Building release binary..."
-    cargo build --release
+    Write-Host "Building release binary (GUI subsystem + embedded icon)..."
+    cargo build --release --bin comruvi
     if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed" }
 }
 

@@ -20,17 +20,133 @@ use meta_parsers::{default_parser_dir, exif_orientation, load_parsers, read_meta
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 const THUMB_SIZE: u32 = 160;
-const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// From repo-root `VERSION` via `build.rs` (not `CARGO_PKG_VERSION`).
+const APP_VERSION: &str = env!("COMRUVI_VERSION");
+const CONFIG_VERSION: &str = env!("COMRUVI_CONFIG_VERSION");
 const GITHUB_URL: &str = "https://github.com/astolzen/comruvi";
+const INSTANCE_ID: &str = "comruvi-astolzen-single-instance";
+
+/// How the process was started (CLI / file association / cold start).
+struct LaunchRequest {
+    folder: PathBuf,
+    /// Image to select and show in the separate viewer (from "Open with" / double-click).
+    open_image: Option<PathBuf>,
+    /// When true, CLI/file-association wins over `config.lastfolder`.
+    from_cli: bool,
+}
 
 fn main() -> eframe::Result<()> {
-    let folder = std::env::args().nth(1).map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+    let launch = parse_launch_request();
+
+    // One UI process: further "Open with" invocations hand the path to the running app.
+    let instance = single_instance::SingleInstance::new(INSTANCE_ID)
+        .unwrap_or_else(|error| panic!("single-instance: {error}"));
+    if !instance.is_single() {
+        let handoff = launch
+            .open_image
+            .as_ref()
+            .or(if launch.from_cli { Some(&launch.folder) } else { None });
+        if let Some(path) = handoff {
+            if let Err(error) = write_open_request(path) {
+                // No console on Windows GUI builds; exit non-zero for diagnostics.
+                let _ = error;
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_icon(app_icon_arc()),
         ..Default::default()
     };
-    eframe::run_native("comruvi", options, Box::new(move |_| Ok(Box::new(App::new(folder)))))
+    eframe::run_native(
+        "comruvi",
+        options,
+        Box::new(move |cc| {
+            start_open_request_watcher(cc.egui_ctx.clone());
+            Ok(Box::new(App::new(launch, instance)))
+        }),
+    )
+}
+
+fn parse_launch_request() -> LaunchRequest {
+    let fallback = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let Some(raw) = std::env::args().nth(1) else {
+        return LaunchRequest { folder: fallback, open_image: None, from_cli: false };
+    };
+    let path = PathBuf::from(&raw);
+    let path = path.canonicalize().unwrap_or(path);
+    if path.is_file() {
+        let folder = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| fallback.clone());
+        let open_image = is_image(&path).then_some(path);
+        return LaunchRequest { folder, open_image, from_cli: true };
+    }
+    if path.is_dir() {
+        return LaunchRequest { folder: path, open_image: None, from_cli: true };
+    }
+    // Path may not exist yet (rare); if it looks like an image, use the parent.
+    if is_image(&path) {
+        let folder = path.parent().map(Path::to_path_buf).unwrap_or(fallback);
+        return LaunchRequest { folder, open_image: Some(path), from_cli: true };
+    }
+    LaunchRequest { folder: fallback, open_image: None, from_cli: true }
+}
+
+fn open_request_path() -> PathBuf {
+    Config::path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("open-request")
+}
+
+fn write_open_request(path: &Path) -> Result<()> {
+    let target = open_request_path();
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = target.with_extension("tmp");
+    fs::write(&tmp, path.to_string_lossy().as_bytes())?;
+    fs::rename(&tmp, &target)?;
+    Ok(())
+}
+
+fn take_open_request() -> Option<PathBuf> {
+    let target = open_request_path();
+    let contents = fs::read_to_string(&target).ok()?;
+    let _ = fs::remove_file(&target);
+    let path = PathBuf::from(contents.trim().trim_matches('"'));
+    if path.as_os_str().is_empty() {
+        None
+    } else {
+        Some(path)
+    }
+}
+
+fn start_open_request_watcher(ctx: EguiContext) {
+    let watch_path = open_request_path();
+    let _ = std::thread::Builder::new()
+        .name("comruvi-open-request".into())
+        .spawn(move || loop {
+            std::thread::sleep(Duration::from_millis(250));
+            if watch_path.is_file() {
+                ctx.request_repaint();
+            }
+        });
+}
+
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 /// Rasterize `cv-ivon.svg` for textures and the window / taskbar icon.
@@ -86,6 +202,10 @@ struct App {
     watched_folder: Option<PathBuf>,
     /// Debounce timer after filesystem events before rescanning images.
     folder_dirty_since: Option<Instant>,
+    /// Holds the OS single-instance lock for the lifetime of the UI process.
+    _instance: single_instance::SingleInstance,
+    /// Image/folder to open once egui context is available (CLI / file association).
+    pending_external_open: Option<PathBuf>,
 }
 struct ThumbnailJob { receiver: Receiver<bool>, completed: usize, total: usize }
 #[derive(Default)]
@@ -137,8 +257,11 @@ impl Config {
         if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
         let quote = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
         let mut contents = format!(
-            "version = 0.06\nthumbnailsize = \"{}\"\nfonttype = \"{}\"\nfontsize = {}\ndisplaymode = \"{}\"\nparserdir = \"{}\"\n",
-            quote(&self.thumbnailsize), quote(&self.fonttype), self.fontsize, quote(&self.displaymode),
+            "version = {CONFIG_VERSION}\nthumbnailsize = \"{}\"\nfonttype = \"{}\"\nfontsize = {}\ndisplaymode = \"{}\"\nparserdir = \"{}\"\n",
+            quote(&self.thumbnailsize),
+            quote(&self.fonttype),
+            self.fontsize,
+            quote(&self.displaymode),
             quote(&self.parserdir.to_string_lossy()),
         );
         if let Some(folder) = &self.lastfolder { contents.push_str(&format!("lastfolder = \"{}\"\n", quote(&folder.to_string_lossy()))); }
@@ -149,9 +272,24 @@ impl Config {
 }
 
 impl App {
-    fn new(folder: PathBuf) -> Self {
+    fn new(launch: LaunchRequest, instance: single_instance::SingleInstance) -> Self {
         let config = Config::load();
-        let folder = config.lastfolder.as_ref().filter(|path| path.is_dir()).cloned().unwrap_or(folder);
+        // Drop a stale hand-off from a previous crash so we do not reopen it cold.
+        let _ = fs::remove_file(open_request_path());
+        let folder = if launch.from_cli {
+            launch.folder
+        } else {
+            config
+                .lastfolder
+                .as_ref()
+                .filter(|path| path.is_dir())
+                .cloned()
+                .unwrap_or(launch.folder)
+        };
+        let pending_external_open = launch.open_image.or_else(|| {
+            // CLI folder-only: still switch into that folder (already applied above).
+            None
+        });
         let (parsers, parser_notice) = match load_parsers(&config.parserdir) {
             Ok(parsers) => (parsers, None),
             Err(error) => (Vec::new(), Some(format!("Could not load parsers: {error}"))),
@@ -165,6 +303,8 @@ impl App {
             thumbnail_job: None, film_view: ViewTransform::default(), viewer_view: ViewTransform::default(),
             pending_file_drag: None, scroll_selection_into_view: false,
             folder_watcher: None, folder_events: None, watched_folder: None, folder_dirty_since: None,
+            _instance: instance,
+            pending_external_open,
         };
         app.load_folder();
         // Create/update the config on first launch as well, so every documented
@@ -172,6 +312,61 @@ impl App {
         app.remember_folder();
         app
     }
+
+    /// Open a folder or image from the shell / a second-instance hand-off.
+    fn open_external_path(&mut self, path: PathBuf, ctx: &EguiContext) {
+        let path = path.canonicalize().unwrap_or(path);
+        if path.is_dir() {
+            self.tree_root = path.clone();
+            self.folder = path;
+            self.mode = Mode::Thumbnails;
+            self.viewer_open = false;
+            self.load_folder();
+            self.remember_folder();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            return;
+        }
+        if !is_image(&path) {
+            self.notice = Some(format!("Not a supported image: {}", path.display()));
+            return;
+        }
+        let folder = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.folder.clone());
+        let folder = folder.canonicalize().unwrap_or(folder);
+        if !paths_equal(&self.folder, &folder) {
+            self.tree_root = folder.clone();
+            self.folder = folder;
+            self.load_folder();
+            self.remember_folder();
+        }
+        self.mode = Mode::Thumbnails;
+        if let Some(index) = self.entries.iter().position(|entry| paths_equal(&entry.path, &path)) {
+            if self.selected != Some(index) {
+                self.select(index, ctx);
+            } else if self.image_texture.is_none() {
+                self.selected = None;
+                self.select(index, ctx);
+            }
+            self.viewer_open = true;
+            self.viewer_view.reset();
+            self.scroll_selection_into_view = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        } else {
+            self.notice = Some(format!("Image not found in folder: {}", path.display()));
+        }
+    }
+
+    fn poll_open_requests(&mut self, ctx: &EguiContext) {
+        if let Some(path) = self.pending_external_open.take() {
+            self.open_external_path(path, ctx);
+        }
+        if let Some(path) = take_open_request() {
+            self.open_external_path(path, ctx);
+        }
+    }
+
     fn load_folder(&mut self) {
         // Drop any in-flight job for the previous folder so the worker exits on
         // the next send and the new folder can queue its own missing thumbs.
@@ -402,6 +597,7 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &EguiContext, frame: &mut eframe::Frame) {
         self.thumb_loads_left = 4;
+        self.poll_open_requests(ctx);
         self.ensure_folder_watch(ctx);
         self.poll_folder_changes(ctx);
         self.poll_thumbnail_job();

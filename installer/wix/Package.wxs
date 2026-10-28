@@ -31,6 +31,8 @@
     <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
 
     <Binary Id="ComruviIconBmp" SourceFile="$(var.IconBmp)" />
+    <!-- Start Menu / pinned shortcut icon (also embedded in comruvi.exe) -->
+    <Icon Id="ComruviAppIcon" SourceFile="$(var.IconIco)" />
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="INSTALLFOLDER" Name="comruvi">
@@ -52,6 +54,7 @@
             Directory="ProgramMenuFolder"
             WorkingDirectory="INSTALLFOLDER"
             Advertise="no"
+            Icon="ComruviAppIcon"
             Description="comruvi - ComfyUI Rust Viewer" />
         <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
         <RegistryValue
