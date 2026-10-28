@@ -30,9 +30,9 @@ powershell -ExecutionPolicy Bypass -File .\installer\pack-windows.ps1
 **MSI:** `dist/comruvi-<version>-windows-x64.msi`
 
 ```powershell
-msiexec /i dist\comruvi-0.0.8-windows-x64.msi
+msiexec /i dist\comruvi-0.0.9-windows-x64.msi
 # quiet, keep existing config/parsers:
-msiexec /i dist\comruvi-0.0.8-windows-x64.msi CONFLICTACTION=Keep /qn
+msiexec /i dist\comruvi-0.0.9-windows-x64.msi CONFLICTACTION=Keep /qn
 ```
 
 The installer shows an early-alpha Accept/Decline warning, then the **AGPL-3.0**
@@ -87,8 +87,10 @@ Supported input formats in this alpha release are PNG, JPG, and JPEG.
   command line: `comruvi.exe C:\path\to\image.png`.
 - **Filter** in the toolbar: enter a **full text** phrase (e.g. `blue eyes`) to show
   only images whose `.metadata` sidecar contains that phrase
-  (case-insensitive, whole phrase including spaces). **reset** clears the filter.
-  The Filter button stays highlighted while a filter is active.
+  (case-insensitive, whole phrase including spaces). Next to each **active** LoRA
+  in the info pane, **Filter** limits the view to images with that LoRA active.
+  **reset** clears all filters. The toolbar Filter button stays highlighted while
+  any filter is active.
 - The **Folders** pane is a tree with its own scrollbar. Click a name to open that
   folder; use the chevron controls to expand or collapse. **Up** (with arrow icon)
   moves to the parent. The lower **Favorite places** area provides persistent
@@ -119,7 +121,7 @@ Supported input formats in this alpha release are PNG, JPG, and JPEG.
 
 comruvi creates a readable TOML configuration at
 `~/.config/comruvi/config.toml` (on Windows, `%USERPROFILE%\.config\comruvi\config.toml`).
-It records `version = 0.08`, the last opened folder, `parserdir` (directory of
+It records `version = 0.09`, the last opened folder, `parserdir` (directory of
 translator files), and up to ten favorites as `quick0` through `quick9`; unused
 quick keys are omitted. It also writes the reserved future settings
 `thumbnailsize`, `fonttype`, `fontsize`, and `displaymode`. The lower part of
@@ -162,11 +164,11 @@ Comruvi is an independed project and not affiliated with ComfyUI. It does neithe
 
 ## Current status
 
-**Alpha 8 (0.08).** Implemented: folder tree with independent scroll, persistent
+**Alpha 9 (0.09).** Implemented: folder tree with independent scroll, persistent
 favorites, thumbnail grid, filmstrip, live folder watching, Shift+drag to ComfyUI,
 Home/End navigation, background thumbnail and `.metadata` cache generation,
 modular metadata translators (ComfyUI + EXIF photo), JPEG orientation-aware
 display, a synchronized secondary viewer window with zoom/pan, Windows MSI
 installer, embedded taskbar icon, file-association / single-instance open, and
-toolbar **Filter** (full text phrase search). See
+toolbar **Filter** (full text + active-LoRA filters). See
 [CHANGELOG.md](CHANGELOG.md) for the detailed history.

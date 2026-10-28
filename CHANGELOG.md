@@ -2,6 +2,23 @@
 
 All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
+## 0.09-alpha (Alpha 9) — 2026-10-28
+
+### Added
+
+- Per-LoRA **Filter** button next to each active LoRA in the info pane; filters the
+  folder to images where that LoRA is active (combinable with full text).
+
+### Changed
+
+- Config writes `version = 0.09`.
+
+### Fixed
+
+- Switching folders while thumbnail/metadata background jobs were running could
+  leave the image list empty until restart; jobs are cancelled on folder change,
+  and folder-watch refreshes are suppressed while workers run.
+
 ## 0.08-alpha (Alpha 8) — 2026-10-28
 
 ### Added

@@ -113,11 +113,15 @@ pub struct CachedImageMeta {
     pub positive: Option<String>,
     #[serde(default)]
     pub negative: Option<String>,
+    /// All LoRA names mentioned in the translator fields.
     #[serde(default)]
     pub loras: Vec<String>,
+    /// LoRA names marked active (not `; inactive)` in the display string).
+    #[serde(default)]
+    pub loras_active: Vec<String>,
 }
 
-pub const METADATA_CACHE_VERSION: u32 = 1;
+pub const METADATA_CACHE_VERSION: u32 = 2;
 
 /// `.metadata/<filename>.json` next to the image (Geeqie-style sidecar layout).
 pub fn metadata_cache_path(image: &Path) -> PathBuf {
@@ -150,18 +154,25 @@ fn field_value<'a>(fields: &'a [(String, String)], label: &str) -> Option<&'a st
         .map(|(_, value)| value.as_str())
 }
 
-fn derive_loras(fields: &[(String, String)]) -> Vec<String> {
+fn lora_display_name(value: &str) -> String {
+    value
+        .split(" (")
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .to_string()
+}
+
+fn is_inactive_lora_value(value: &str) -> bool {
+    value.contains("; inactive)")
+}
+
+fn derive_loras(fields: &[(String, String)], active_only: bool) -> Vec<String> {
     fields
         .iter()
         .filter(|(key, _)| key == "LoRA" || key.eq_ignore_ascii_case("LoRA List"))
-        .map(|(_, value)| {
-            value
-                .split(" (")
-                .next()
-                .unwrap_or(value)
-                .trim()
-                .to_string()
-        })
+        .filter(|(_, value)| !active_only || !is_inactive_lora_value(value))
+        .map(|(_, value)| lora_display_name(value))
         .filter(|name| !name.is_empty())
         .collect()
 }
@@ -206,11 +217,22 @@ impl CachedImageMeta {
         for lora in &self.loras {
             parts.push(lora.clone());
         }
+        for lora in &self.loras_active {
+            parts.push(lora.clone());
+        }
         for (key, value) in &self.fields {
             parts.push(key.clone());
             parts.push(value.clone());
         }
         parts.join("\n").to_ascii_lowercase()
+    }
+
+    fn active_lora_names(&self) -> Vec<String> {
+        if !self.loras_active.is_empty() {
+            return self.loras_active.clone();
+        }
+        // Older caches / fallback: derive from LoRA field rows.
+        derive_loras(&self.fields, true)
     }
 }
 
@@ -227,6 +249,17 @@ pub fn image_matches_volltext(image: &Path, file_name: &str, needle_lower: &str)
         .unwrap_or(false)
 }
 
+/// True when the image's metadata cache lists `lora_name` as an active LoRA.
+pub fn image_has_active_lora(image: &Path, lora_name: &str) -> bool {
+    let Some(cached) = load_cached_image_meta(image) else {
+        return false;
+    };
+    cached
+        .active_lora_names()
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(lora_name))
+}
+
 /// Extract translator fields for `image` and write `.metadata/<name>.json`.
 pub fn write_image_metadata_cache(image: &Path, parsers: &[ParserConfig]) -> Result<PathBuf> {
     let (mtime, size) = source_stamp(image)?;
@@ -238,7 +271,8 @@ pub fn write_image_metadata_cache(image: &Path, parsers: &[ParserConfig]) -> Res
         parser: meta.parser.clone(),
         positive: field_value(&meta.fields, "Positive prompt").map(str::to_string),
         negative: field_value(&meta.fields, "Negative prompt").map(str::to_string),
-        loras: derive_loras(&meta.fields),
+        loras: derive_loras(&meta.fields, false),
+        loras_active: derive_loras(&meta.fields, true),
         fields: meta.fields,
     };
     let dest = metadata_cache_path(image);
@@ -248,7 +282,10 @@ pub fn write_image_metadata_cache(image: &Path, parsers: &[ParserConfig]) -> Res
     }
     let json = serde_json::to_string_pretty(&cached)
         .context("serialize metadata cache")?;
-    fs::write(&dest, json).with_context(|| format!("writing {}", dest.display()))?;
+    // Atomic replace so readers never see a partial JSON while the worker writes.
+    let tmp = dest.with_extension("json.tmp");
+    fs::write(&tmp, json).with_context(|| format!("writing {}", tmp.display()))?;
+    fs::rename(&tmp, &dest).with_context(|| format!("renaming {}", dest.display()))?;
     Ok(dest)
 }
 

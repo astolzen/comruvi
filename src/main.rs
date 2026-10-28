@@ -8,7 +8,11 @@ use std::{
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc::{self, Receiver},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -17,8 +21,9 @@ use arboard::Clipboard;
 use eframe::egui::{self, ColorImage, Context as EguiContext, Image, ScrollArea, TextureHandle, TextureOptions, Vec2};
 use image::imageops::FilterType;
 use meta_parsers::{
-    default_parser_dir, exif_orientation, image_matches_volltext, load_parsers,
-    metadata_cache_is_stale, read_metadata, write_image_metadata_cache, Metadata, ParserConfig,
+    default_parser_dir, exif_orientation, image_has_active_lora, image_matches_volltext,
+    load_parsers, metadata_cache_is_stale, read_metadata, write_image_metadata_cache, Metadata,
+    ParserConfig,
 };
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -217,24 +222,35 @@ struct App {
     pending_external_open: Option<PathBuf>,
     /// Active view filters (volltext phrase, …).
     view_filter: ViewFilter,
+    /// Bumped on every folder load so stale background workers are ignored/cancelled.
+    job_generation: Arc<AtomicU64>,
 }
 
 #[derive(Default, Clone)]
 struct ViewFilter {
-    /// Contiguous phrase; empty means no volltext filter. Matching is case-insensitive.
+    /// Contiguous phrase; empty means no full-text filter. Matching is case-insensitive.
     volltext: String,
+    /// When set, only images with this LoRA marked active are shown.
+    active_lora: Option<String>,
 }
 
 impl ViewFilter {
     fn is_active(&self) -> bool {
-        !self.volltext.trim().is_empty()
+        !self.volltext.trim().is_empty() || self.active_lora.is_some()
     }
 
     fn reset(&mut self) {
         self.volltext.clear();
+        self.active_lora = None;
     }
 }
-struct BackgroundJob { receiver: Receiver<bool>, completed: usize, total: usize }
+struct BackgroundJob {
+    receiver: Receiver<bool>,
+    completed: usize,
+    total: usize,
+    generation: u64,
+    cancel: Arc<AtomicBool>,
+}
 #[derive(Default)]
 struct ViewTransform { scale: Option<f32>, pan: Vec2 }
 impl ViewTransform { fn reset(&mut self) { self.scale = None; self.pan = Vec2::ZERO; } }
@@ -335,6 +351,7 @@ impl App {
             _instance: instance,
             pending_external_open,
             view_filter: ViewFilter::default(),
+            job_generation: Arc::new(AtomicU64::new(0)),
         };
         app.load_folder();
         // Create/update the config on first launch as well, so every documented
@@ -411,12 +428,9 @@ impl App {
     }
 
     fn load_folder(&mut self) {
-        // Drop any in-flight job for the previous folder so the worker exits on
-        // the next send and the new folder can queue its own missing thumbs.
-        // Without this, rapid folder switches leave intermediate folders unqueued
-        // until the old job finishes — only the last folder gets a fresh job.
-        self.thumbnail_job = None;
-        self.metadata_job = None;
+        // Cancel in-flight workers from the previous folder. Dropping the Receiver
+        // alone left them writing and spamming the directory watcher.
+        self.cancel_background_jobs();
         self.folder_children.clear();
         self.all_entries.clear();
         self.entries.clear();
@@ -428,8 +442,24 @@ impl App {
         self.apply_view_filter(None);
         self.watched_folder = None; // recreate watcher for the new folder on next frame
         self.folder_dirty_since = None;
+        // Drain any pending watch events from the previous folder.
+        if let Some(receiver) = &self.folder_events {
+            while receiver.try_recv().is_ok() {}
+        }
         self.queue_missing_thumbnails();
         self.queue_missing_metadata();
+    }
+
+    fn cancel_background_jobs(&mut self) {
+        if let Some(job) = &self.thumbnail_job {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        if let Some(job) = &self.metadata_job {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
+        self.thumbnail_job = None;
+        self.metadata_job = None;
+        self.job_generation.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Rescan the current folder without wiping selection or cached thumbnails.
@@ -465,16 +495,25 @@ impl App {
     fn apply_view_filter(&mut self, ctx: Option<&EguiContext>) {
         let selected_path = self.selected_path();
         let needle = self.view_filter.volltext.trim().to_ascii_lowercase();
-        if needle.is_empty() {
-            self.entries = self.all_entries.clone();
-        } else {
-            self.entries = self
-                .all_entries
-                .iter()
-                .filter(|entry| image_matches_volltext(&entry.path, &entry.name, &needle))
-                .cloned()
-                .collect();
-        }
+        let active_lora = self.view_filter.active_lora.clone();
+        self.entries = self
+            .all_entries
+            .iter()
+            .filter(|entry| {
+                if !needle.is_empty()
+                    && !image_matches_volltext(&entry.path, &entry.name, &needle)
+                {
+                    return false;
+                }
+                if let Some(lora) = &active_lora {
+                    if !image_has_active_lora(&entry.path, lora) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .cloned()
+            .collect();
         if let Some(path) = selected_path {
             if let Some(index) = self
                 .entries
@@ -539,11 +578,25 @@ impl App {
     }
 
     fn poll_folder_changes(&mut self, ctx: &EguiContext) {
+        // While our own thumbnail/metadata workers run, their creates under
+        // `.thumbnails` / `.metadata` (and parent-dir noise on Windows) would
+        // otherwise trigger refresh_entries and fight the jobs — sometimes
+        // leaving the UI with an empty image list until restart.
+        let jobs_running = self.thumbnail_job.is_some() || self.metadata_job.is_some();
+        if jobs_running {
+            if let Some(receiver) = &self.folder_events {
+                while receiver.try_recv().is_ok() {}
+            }
+            self.folder_dirty_since = None;
+            return;
+        }
+
+        let watched = self.watched_folder.clone();
         let mut dirty = false;
         if let Some(receiver) = &self.folder_events {
             while let Ok(message) = receiver.try_recv() {
                 if let Ok(event) = message {
-                    if folder_event_relevant(&event) {
+                    if folder_event_relevant(&event, watched.as_deref()) {
                         dirty = true;
                     }
                 }
@@ -641,10 +694,18 @@ impl App {
         if total == 0 { return; }
         let (sender, receiver) = mpsc::channel();
         let job_paths = paths.clone();
+        let generation = self.job_generation.load(Ordering::Relaxed);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_flag = Arc::clone(&cancel);
         std::thread::spawn(move || {
             for path in job_paths {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    break;
+                }
                 let succeeded = create_thumbnail(&path, &thumbnail_path(&path)).is_ok();
-                if sender.send(succeeded).is_err() { break; }
+                if sender.send(succeeded).is_err() {
+                    break;
+                }
             }
         });
         if clear_all_textures {
@@ -652,7 +713,13 @@ impl App {
         } else {
             for path in &paths { self.thumb_textures.remove(path); }
         }
-        self.thumbnail_job = Some(BackgroundJob { receiver, completed: 0, total });
+        self.thumbnail_job = Some(BackgroundJob {
+            receiver,
+            completed: 0,
+            total,
+            generation,
+            cancel,
+        });
         self.refresh_job_notice();
     }
     fn start_metadata_job(&mut self, paths: Vec<PathBuf>) {
@@ -661,15 +728,27 @@ impl App {
         let (sender, receiver) = mpsc::channel();
         let job_paths = paths;
         let parsers = self.parsers.clone();
+        let generation = self.job_generation.load(Ordering::Relaxed);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_flag = Arc::clone(&cancel);
         std::thread::spawn(move || {
             for path in job_paths {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    break;
+                }
                 let succeeded = write_image_metadata_cache(&path, &parsers).is_ok();
                 if sender.send(succeeded).is_err() {
                     break;
                 }
             }
         });
-        self.metadata_job = Some(BackgroundJob { receiver, completed: 0, total });
+        self.metadata_job = Some(BackgroundJob {
+            receiver,
+            completed: 0,
+            total,
+            generation,
+            cancel,
+        });
         self.refresh_job_notice();
     }
     fn navigate(&mut self, direction: isize, ctx: &EguiContext) {
@@ -711,13 +790,37 @@ impl App {
         self.remember_folder();
     }
     fn poll_background_jobs(&mut self) {
+        let current_gen = self.job_generation.load(Ordering::Relaxed);
         let mut thumb_done = false;
         let mut meta_done = false;
+
+        // Drop jobs cancelled by a folder switch (generation mismatch).
+        if self
+            .thumbnail_job
+            .as_ref()
+            .is_some_and(|job| job.generation != current_gen)
+        {
+            if let Some(job) = &self.thumbnail_job {
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+            self.thumbnail_job = None;
+        }
+        if self
+            .metadata_job
+            .as_ref()
+            .is_some_and(|job| job.generation != current_gen)
+        {
+            if let Some(job) = &self.metadata_job {
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+            self.metadata_job = None;
+        }
+
         if let Some(job) = &mut self.thumbnail_job {
             while job.receiver.try_recv().is_ok() {
                 job.completed += 1;
             }
-            if job.completed >= job.total {
+            if job.completed >= job.total || job.cancel.load(Ordering::Relaxed) {
                 thumb_done = true;
             }
         }
@@ -725,23 +828,35 @@ impl App {
             while job.receiver.try_recv().is_ok() {
                 job.completed += 1;
             }
-            if job.completed >= job.total {
+            if job.completed >= job.total || job.cancel.load(Ordering::Relaxed) {
                 meta_done = true;
             }
         }
         if thumb_done {
+            let cancelled = self
+                .thumbnail_job
+                .as_ref()
+                .is_some_and(|job| job.cancel.load(Ordering::Relaxed));
             let total = self.thumbnail_job.as_ref().map(|j| j.total).unwrap_or(0);
             self.thumbnail_job = None;
-            self.notice = Some(format!("Thumbnail update finished ({total} images)."));
-            self.queue_missing_thumbnails();
+            if !cancelled {
+                self.notice = Some(format!("Thumbnail update finished ({total} images)."));
+                self.queue_missing_thumbnails();
+            }
         }
         if meta_done {
+            let cancelled = self
+                .metadata_job
+                .as_ref()
+                .is_some_and(|job| job.cancel.load(Ordering::Relaxed));
             let total = self.metadata_job.as_ref().map(|j| j.total).unwrap_or(0);
             self.metadata_job = None;
-            self.notice = Some(format!("Metadata cache update finished ({total} images)."));
-            // New sidecars may change which images match the active filter.
-            self.apply_view_filter(None);
-            self.queue_missing_metadata();
+            if !cancelled {
+                self.notice = Some(format!("Metadata cache update finished ({total} images)."));
+                // New sidecars may change which images match the active filter.
+                self.apply_view_filter(None);
+                self.queue_missing_metadata();
+            }
         }
         if self.thumbnail_job.is_some() || self.metadata_job.is_some() {
             self.refresh_job_notice();
@@ -850,6 +965,11 @@ impl eframe::App for App {
                             filter_changed = true;
                             ui.close_menu();
                         }
+                        if let Some(lora) = &self.view_filter.active_lora {
+                            ui.label(
+                                egui::RichText::new(format!("LoRA (active): {lora}")).small(),
+                            );
+                        }
                         ui.separator();
                         ui.label("full text");
                         let edit = ui.add(
@@ -957,7 +1077,7 @@ impl eframe::App for App {
         }
         if self.show_info {
             egui::SidePanel::right("metadata").resizable(true).default_width(330.0).show(ctx, |ui| {
-                metadata_ui(ui, self);
+                metadata_ui(ui, self, ctx);
             });
         }
         egui::CentralPanel::default().show(ctx, |ui| match self.mode { Mode::Thumbnails => thumbnails_ui(ui, self, ctx), Mode::Filmstrip => filmstrip_ui(ui, self, ctx) });
@@ -1021,10 +1141,24 @@ fn folder_tree(ui: &mut egui::Ui, app: &mut App, dir: &Path, changed: &mut bool)
 
 fn thumbnails_ui(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
     ui.heading(app.folder.display().to_string());
-    ui.label(format!(
-        "{} image(s) · double-click to open viewer · Shift+drag into ComfyUI",
-        app.entries.len()
-    ));
+    if app.view_filter.is_active() {
+        ui.label(format!(
+            "{} of {} image(s) · double-click to open viewer · Shift+drag into ComfyUI",
+            app.entries.len(),
+            app.all_entries.len()
+        ));
+        if app.entries.is_empty() && !app.all_entries.is_empty() {
+            ui.colored_label(
+                egui::Color32::from_rgb(200, 140, 40),
+                "Active filter hides all images in this folder — use Filter → reset to show them.",
+            );
+        }
+    } else {
+        ui.label(format!(
+            "{} image(s) · double-click to open viewer · Shift+drag into ComfyUI",
+            app.entries.len()
+        ));
+    }
     let width = ui.available_width(); let columns = (width / 184.0).max(1.0) as usize;
     app.thumb_columns = columns;
     let scroll_selected = app.scroll_selection_into_view;
@@ -1199,7 +1333,7 @@ fn zoomable_image(
     start_file_drag
 }
 
-fn metadata_ui(ui: &mut egui::Ui, app: &mut App) {
+fn metadata_ui(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
     let m = &app.metadata;
     ui.heading("Image information");
     if let Some(parser) = &m.parser {
@@ -1221,10 +1355,40 @@ fn metadata_ui(ui: &mut egui::Ui, app: &mut App) {
                 {
                     let value = app.metadata.fields[index].1.clone();
                     let inactive = value.contains("; inactive)");
+                    let lora_name = value
+                        .split(" (")
+                        .next()
+                        .unwrap_or(value.as_str())
+                        .trim()
+                        .to_string();
+                    let lora_filter_on = app
+                        .view_filter
+                        .active_lora
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(&lora_name));
                     ui.horizontal_wrapped(|ui| {
-                        if inactive { ui.colored_label(egui::Color32::GRAY, &value); }
-                        else { ui.label(&value); }
-                        if ui.small_button("Copy").clicked() { copy(&value); }
+                        if inactive {
+                            ui.colored_label(egui::Color32::GRAY, &value);
+                        } else {
+                            ui.label(&value);
+                        }
+                        if ui.small_button("Copy").clicked() {
+                            copy(&value);
+                        }
+                        if !inactive && !lora_name.is_empty() {
+                            if ui
+                                .add(egui::Button::new("Filter").selected(lora_filter_on).small())
+                                .on_hover_text("Show only images where this LoRA is active")
+                                .clicked()
+                            {
+                                if lora_filter_on {
+                                    app.view_filter.active_lora = None;
+                                } else {
+                                    app.view_filter.active_lora = Some(lora_name.clone());
+                                }
+                                app.apply_view_filter(Some(ctx));
+                            }
+                        }
                     });
                     index += 1;
                 }
@@ -1265,13 +1429,20 @@ fn scan_images(folder: &Path) -> Vec<Entry> {
     files
 }
 
-/// Ignore cache-dir writes; any other change under the watched folder may add/remove images.
-fn folder_event_relevant(event: &Event) -> bool {
+/// Ignore cache-dir writes and pure "watched root" noise; other changes may add/remove images.
+fn folder_event_relevant(event: &Event, watched_folder: Option<&Path>) -> bool {
     event.paths.iter().any(|path| {
-        !path.components().any(|component| {
+        if let Some(watched) = watched_folder {
+            if path == watched {
+                // Windows often emits the parent dir when children change; ignore that.
+                return false;
+            }
+        }
+        let is_cache = path.components().any(|component| {
             let name = component.as_os_str();
             name == ".thumbnails" || name == ".metadata"
-        })
+        });
+        !is_cache
     })
 }
 
