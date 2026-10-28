@@ -851,7 +851,7 @@ impl eframe::App for App {
                             ui.close_menu();
                         }
                         ui.separator();
-                        ui.label("volltext");
+                        ui.label("full text");
                         let edit = ui.add(
                             egui::TextEdit::singleline(&mut self.view_filter.volltext)
                                 .desired_width(220.0)

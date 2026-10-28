@@ -85,7 +85,7 @@ Supported input formats in this alpha release are PNG, JPG, and JPEG.
   separate viewer. If comruvi is already running, that instance switches folder
   and viewer instead of starting a second window. The same path works from the
   command line: `comruvi.exe C:\path\to\image.png`.
-- **Filter** in the toolbar: enter a **volltext** phrase (e.g. `blue eyes`) to show
+- **Filter** in the toolbar: enter a **full text** phrase (e.g. `blue eyes`) to show
   only images whose `.metadata` sidecar contains that phrase
   (case-insensitive, whole phrase including spaces). **reset** clears the filter.
   The Filter button stays highlighted while a filter is active.
@@ -168,5 +168,5 @@ Home/End navigation, background thumbnail and `.metadata` cache generation,
 modular metadata translators (ComfyUI + EXIF photo), JPEG orientation-aware
 display, a synchronized secondary viewer window with zoom/pan, Windows MSI
 installer, embedded taskbar icon, file-association / single-instance open, and
-toolbar **Filter** (volltext phrase search). See
+toolbar **Filter** (full text phrase search). See
 [CHANGELOG.md](CHANGELOG.md) for the detailed history.

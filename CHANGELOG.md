@@ -10,7 +10,7 @@ All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
   auto-fill for missing/stale entries, toolbar progress, and **Recreate → Metadata**.
 - Toolbar **Recreate** menu replaces the old “Recreate thumbnails” button
   (options: Thumbnails, Metadata).
-- Toolbar **Filter** menu: **reset**, **volltext** phrase search (case-insensitive,
+- Toolbar **Filter** menu: **reset**, **full text** phrase search (case-insensitive,
   contiguous match including spaces) against `.metadata` sidecars; button highlights
   like Thumbnails/Filmstrip while a filter is active.
 
