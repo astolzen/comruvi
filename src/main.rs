@@ -1,5 +1,8 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod file_drag;
 mod meta_parsers;
+mod ui_icons;
 
 use std::{
     collections::BTreeMap,
@@ -17,11 +20,40 @@ use meta_parsers::{default_parser_dir, exif_orientation, load_parsers, read_meta
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 const THUMB_SIZE: u32 = 160;
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+const GITHUB_URL: &str = "https://github.com/astolzen/comruvi";
 
 fn main() -> eframe::Result<()> {
     let folder = std::env::args().nth(1).map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok()).unwrap_or_default();
-    eframe::run_native("comruvi", eframe::NativeOptions::default(), Box::new(move |_| Ok(Box::new(App::new(folder)))))
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_icon(app_icon_arc()),
+        ..Default::default()
+    };
+    eframe::run_native("comruvi", options, Box::new(move |_| Ok(Box::new(App::new(folder)))))
+}
+
+/// Rasterize `cv-ivon.svg` for textures and the window / taskbar icon.
+fn load_app_icon_image() -> ColorImage {
+    egui_extras::image::load_svg_bytes_with_size(
+        include_bytes!("../cv-ivon.svg"),
+        Some(egui::SizeHint::Size(256, 256)),
+    )
+    .expect("cv-ivon.svg must rasterize")
+}
+
+fn app_icon_arc() -> std::sync::Arc<egui::IconData> {
+    use std::sync::OnceLock;
+    static ICON: OnceLock<std::sync::Arc<egui::IconData>> = OnceLock::new();
+    ICON.get_or_init(|| {
+        let image = load_app_icon_image();
+        std::sync::Arc::new(egui::IconData {
+            rgba: image.as_raw().to_vec(),
+            width: image.width() as u32,
+            height: image.height() as u32,
+        })
+    })
+    .clone()
 }
 
 #[derive(Clone)]
@@ -29,8 +61,10 @@ struct Entry { path: PathBuf, name: String }
 
 struct App {
     folder: PathBuf, tree_root: PathBuf, entries: Vec<Entry>, selected: Option<usize>, mode: Mode,
-    show_tree: bool, show_info: bool, viewer_open: bool, thumb_textures: BTreeMap<PathBuf, TextureHandle>,
-    image_texture: Option<TextureHandle>, metadata: Metadata, notice: Option<String>, config: Config,
+    show_tree: bool, show_info: bool, viewer_open: bool, about_open: bool,
+    thumb_textures: BTreeMap<PathBuf, TextureHandle>,
+    image_texture: Option<TextureHandle>, about_icon: Option<TextureHandle>,
+    metadata: Metadata, notice: Option<String>, config: Config,
     parsers: Vec<ParserConfig>,
     /// Last laid-out thumbnail grid column count (for Up/Down row navigation).
     thumb_columns: usize,
@@ -103,7 +137,7 @@ impl Config {
         if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
         let quote = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
         let mut contents = format!(
-            "version = 0.05\nthumbnailsize = \"{}\"\nfonttype = \"{}\"\nfontsize = {}\ndisplaymode = \"{}\"\nparserdir = \"{}\"\n",
+            "version = 0.06\nthumbnailsize = \"{}\"\nfonttype = \"{}\"\nfontsize = {}\ndisplaymode = \"{}\"\nparserdir = \"{}\"\n",
             quote(&self.thumbnailsize), quote(&self.fonttype), self.fontsize, quote(&self.displaymode),
             quote(&self.parserdir.to_string_lossy()),
         );
@@ -124,8 +158,9 @@ impl App {
         };
         let mut app = Self {
             tree_root: folder.clone(), folder, entries: vec![], selected: None, mode: Mode::Thumbnails,
-            show_tree: true, show_info: true, viewer_open: false, thumb_textures: BTreeMap::new(),
-            image_texture: None, metadata: Metadata::default(), notice: parser_notice, config, parsers,
+            show_tree: true, show_info: true, viewer_open: false, about_open: false,
+            thumb_textures: BTreeMap::new(),
+            image_texture: None, about_icon: None, metadata: Metadata::default(), notice: parser_notice, config, parsers,
             thumb_columns: 1, thumb_loads_left: 0, folder_children: BTreeMap::new(), folder_open: BTreeMap::new(),
             thumbnail_job: None, film_view: ViewTransform::default(), viewer_view: ViewTransform::default(),
             pending_file_drag: None, scroll_selection_into_view: false,
@@ -387,9 +422,24 @@ impl eframe::App for App {
         }
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Open folder").clicked() { if let Some(p) = rfd::FileDialog::new().pick_folder() { self.tree_root = p.clone(); self.folder = p; self.load_folder(); self.remember_folder(); } }
-                if ui.button("↑ Up").clicked() { self.go_up(); }
-                if ui.add_enabled(self.thumbnail_job.is_none(), egui::Button::new("↻ Recreate thumbnails")).clicked() { self.recreate_thumbnails(); }
+                if ui_icons::icon_text_button(ui, ui_icons::Icon::FolderOpen, "Open folder").clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                        self.tree_root = p.clone();
+                        self.folder = p;
+                        self.load_folder();
+                        self.remember_folder();
+                    }
+                }
+                if ui_icons::icon_text_button(ui, ui_icons::Icon::ArrowUp, "Up")
+                    .on_hover_text("Go to parent folder")
+                    .clicked()
+                {
+                    self.go_up();
+                }
+                let recreate = ui.add_enabled_ui(self.thumbnail_job.is_none(), |ui| {
+                    ui_icons::icon_text_button(ui, ui_icons::Icon::Refresh, "Recreate thumbnails")
+                });
+                if recreate.inner.clicked() { self.recreate_thumbnails(); }
                 ui.separator(); ui.checkbox(&mut self.show_tree, "Folders"); ui.checkbox(&mut self.show_info, "Info"); ui.separator();
                 ui.selectable_value(&mut self.mode, Mode::Thumbnails, "Thumbnails"); ui.selectable_value(&mut self.mode, Mode::Filmstrip, "Filmstrip");
                 if self.mode == Mode::Filmstrip {
@@ -402,6 +452,9 @@ impl eframe::App for App {
                 }
                 if self.thumbnail_job.is_some() { ui.add(egui::Spinner::new()); }
                 if let Some(n) = &self.notice { ui.label(n); }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("About").clicked() { self.about_open = true; }
+                });
             });
         });
         if self.show_tree {
@@ -425,7 +478,14 @@ impl eframe::App for App {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Favorite places").strong());
-                    if ui.small_button("+ Add…").clicked() { if let Some(path) = rfd::FileDialog::new().pick_folder() { self.add_favorite(path); } }
+                    if ui_icons::icon_button(ui, ui_icons::Icon::Plus)
+                        .on_hover_text("Add favorite folder")
+                        .clicked()
+                    {
+                        if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                            self.add_favorite(path);
+                        }
+                    }
                 });
                 let favorites_height = (ui.available_height()).max(60.0);
                 ScrollArea::vertical()
@@ -444,7 +504,12 @@ impl eframe::App for App {
                                     self.folder_open.insert(favorite.clone(), true);
                                     changed = true;
                                 }
-                                if ui.small_button("×").on_hover_text("Remove favorite").clicked() { remove = Some(index); }
+                                if ui_icons::icon_button(ui, ui_icons::Icon::Close)
+                                    .on_hover_text("Remove favorite")
+                                    .clicked()
+                                {
+                                    remove = Some(index);
+                                }
                             });
                         }
                         if let Some(index) = remove { self.config.favorites.remove(index); if let Err(error) = self.config.save() { self.notice = Some(format!("Could not save config: {error}")); } }
@@ -459,13 +524,14 @@ impl eframe::App for App {
         }
         egui::CentralPanel::default().show(ctx, |ui| match self.mode { Mode::Thumbnails => thumbnails_ui(ui, self, ctx), Mode::Filmstrip => filmstrip_ui(ui, self, ctx) });
         if self.viewer_open { viewer_ui(ctx, self); }
+        if self.about_open { about_ui(ctx, self); }
         // OS drag blocks; run after the egui pass so we still have a valid window handle.
         self.run_pending_file_drag(frame);
     }
 }
 
 /// Folder tree with selection separated from expand/collapse.
-/// Clicking the name opens that folder; ▸/▾ only toggles children.
+/// Clicking the name opens that folder; chevron icons only toggle children.
 fn folder_tree(ui: &mut egui::Ui, app: &mut App, dir: &Path, changed: &mut bool) {
     let name = dir.file_name().unwrap_or_else(|| dir.as_os_str()).to_string_lossy().to_string();
     let is_selected = dir == app.folder;
@@ -484,12 +550,12 @@ fn folder_tree(ui: &mut egui::Ui, app: &mut App, dir: &Path, changed: &mut bool)
 
     ui.horizontal(|ui| {
         if has_children {
-            let arrow = if open { "▾" } else { "▸" };
-            if ui.add(egui::Button::new(arrow).frame(false)).clicked() {
+            let chevron = if open { ui_icons::Icon::ChevronDown } else { ui_icons::Icon::ChevronRight };
+            if ui_icons::icon_button(ui, chevron).clicked() {
                 app.folder_open.insert(dir.to_path_buf(), !open);
             }
         } else {
-            ui.add_space(14.0);
+            ui.add_space(ui.spacing().interact_size.y.min(22.0));
         }
         let label = if is_selected {
             egui::RichText::new(name).background_color(ui.visuals().selection.bg_fill).color(ui.visuals().selection.stroke.color)
@@ -538,7 +604,7 @@ fn thumbnails_ui(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
                         )
                         .on_hover_text("Shift+drag into ComfyUI to open the embedded workflow")
                     } else {
-                        ui.add(egui::Button::new("…").sense(egui::Sense::click_and_drag()))
+                        ui.add(egui::Button::new("...").sense(egui::Sense::click_and_drag()))
                     };
                     if r.clicked() { app.select(i, ctx); }
                     if r.double_clicked() { app.viewer_open = true; }
@@ -625,6 +691,41 @@ fn viewer_ui(ctx: &EguiContext, app: &mut App) {
         if let Some(path) = app.selected_path() { app.queue_file_drag(path); }
     }
     if close_requested { app.viewer_open = false; }
+}
+
+fn about_ui(ctx: &EguiContext, app: &mut App) {
+    if app.about_icon.is_none() {
+        let image = load_app_icon_image();
+        app.about_icon = Some(ctx.load_texture("about-icon", image, TextureOptions::LINEAR));
+    }
+    let icon = app.about_icon.clone();
+    let mut close_requested = false;
+    ctx.show_viewport_immediate(
+        egui::ViewportId::from_hash_of("about-window"),
+        egui::ViewportBuilder::default()
+            .with_title("About comruvi")
+            .with_inner_size([360.0, 320.0])
+            .with_resizable(false)
+            .with_icon(app_icon_arc()),
+        |about_ctx, _| {
+            close_requested = about_ctx.input(|input| input.viewport().close_requested());
+            egui::CentralPanel::default().show(about_ctx, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(16.0);
+                    if let Some(texture) = &icon {
+                        ui.add(Image::new(texture).fit_to_exact_size(Vec2::splat(96.0)));
+                    }
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new("Comruvi").strong().size(32.0));
+                    ui.add_space(6.0);
+                    ui.label(format!("Version {APP_VERSION}"));
+                    ui.add_space(12.0);
+                    ui.hyperlink_to("github.com/astolzen/comruvi", GITHUB_URL);
+                });
+            });
+        },
+    );
+    if close_requested { app.about_open = false; }
 }
 
 /// Draw an image into a clipped viewport with independent zoom and pan state.

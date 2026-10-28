@@ -2,6 +2,21 @@
 
 All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
+## 0.06-alpha (Alpha 6) — 2026-10-28
+
+### Added
+
+- Windows MSI installer warning dialog (Accept / Decline) for early-alpha
+  disclaimer with app icon and a link to the GitHub repository.
+- First published Windows MSI release artifact.
+
+### Changed
+
+- Windows release binary uses the GUI subsystem so no console window appears
+  when launching `comruvi.exe`.
+- Config writes `version = 0.06`.
+- README: **How to Install** (Windows MSI; macOS/Linux via `cargo run --release`).
+
 ## 0.05-alpha (Alpha 5) — 2026-10-21
 
 ### Added
@@ -12,6 +27,12 @@ All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 - **Home** / **End** jump to the first or last image in Thumbnails and Filmstrip.
 - The current folder is watched so new or removed images update the view while
   comruvi is running (`.thumbnails` writes are ignored).
+- Application window/taskbar icon from `cv-ivon.svg`.
+- Windows install packages: MSI (`installer/build-msi.ps1` →
+  `dist/comruvi-<version>-windows-x64.msi`) and zip/script
+  (`installer/pack-windows.ps1`), installing the binary under
+  `%LOCALAPPDATA%\comruvi\` and default config/parsers under
+  `%USERPROFILE%\.config\comruvi\` with Overwrite/Keep conflict handling.
 
 ### Changed
 
@@ -19,6 +40,8 @@ All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 - README includes an application screenshot and notes successful builds on
   **Fedora Linux 44** as well as Windows.
 - Config writes `version = 0.05`.
+- Folder tree and toolbar use painted vector icons (chevrons, up arrow, refresh,
+  folder, …) so controls stay readable without relying on Unicode font glyphs.
 
 ### Fixed
 

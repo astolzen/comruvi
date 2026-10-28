@@ -1,14 +1,23 @@
 [package]
 name = "comruvi"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
 description = "comruvi — ComfyUI Rust Viewer, a local-first image browser for AI generation metadata"
 license = "AGPL-3.0-only"
 
+[[bin]]
+name = "comruvi"
+path = "src/main.rs"
+
+[[bin]]
+name = "export-icon"
+path = "installer/export_icon.rs"
+
 [dependencies]
 eframe = "0.31"
-egui_extras = { version = "0.31", features = ["image"] }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+egui = "0.31"
+egui_extras = { version = "0.31", features = ["image", "svg"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp"] }
 serde_json = "1"
 rfd = "0.15"
 arboard = "3"

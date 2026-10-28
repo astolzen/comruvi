@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Cumfy Viewer application icon</title>
+  <desc id="desc">A minimal white V inside a simple cyan C-shaped frame on a dark rounded square.</desc>
+  <rect width="512" height="512" rx="112" fill="#12181d"/>
+  <path d="M368 132A166 166 0 1 0 368 380" fill="none" stroke="#19c5cf" stroke-width="42" stroke-linecap="round"/>
+  <path d="M176 185 256 336 336 185" fill="none" stroke="#f4f7f8" stroke-width="48" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

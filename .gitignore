@@ -1,3 +1,9 @@
 /examples/
 /target/
+/dist/
+/.wix/
+/installer/wix/Parsers.wxs
+/installer/wix/version.txt
+/installer/wix/License.rtf
+/installer/wix/comruvi-icon.bmp
 **/.thumbnails/

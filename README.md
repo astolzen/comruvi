@@ -9,28 +9,73 @@ comruvi is a fully AI coded Project using both ChatGPT 5.6 and CursorAI.
 
 ![comruvi screenshot](Screenshot.png)
 
-## Install and run
+## How to Install
+
+A packaged installer is currently available **only for Windows**. On **macOS** and
+**Linux**, build and start from source with Cargo (see below). The project has been
+successfully compiled and run on Windows and on Fedora Linux 44.
+
+### Windows
+
+Download the MSI from the
+[GitHub Releases](https://github.com/astolzen/comruvi/releases) page, or build it
+from a clone (Rust + [WiX 5](https://wixtoolset.org/) `dotnet tool install -g wix`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\installer\build-msi.ps1
+# optional zip + script installer:
+powershell -ExecutionPolicy Bypass -File .\installer\pack-windows.ps1
+```
+
+**MSI:** `dist/comruvi-<version>-windows-x64.msi`
+
+```powershell
+msiexec /i dist\comruvi-0.0.6-windows-x64.msi
+# quiet, keep existing config/parsers:
+msiexec /i dist\comruvi-0.0.6-windows-x64.msi CONFLICTACTION=Keep /qn
+```
+
+The installer shows an early-alpha Accept/Decline warning, then the **AGPL-3.0**
+license. If config/parsers already exist, a Yes/No dialog appears:
+**Yes = Overwrite** (dated backup), **No = Keep** (installer copies named with the
+build version).
+
+Both the MSI and the zip installer (`dist/comruvi-<version>-windows-x64.zip` →
+**install.bat**):
+
+- copy `comruvi.exe` to `%LOCALAPPDATA%\comruvi\`
+- install default config/parsers under `%USERPROFILE%\.config\comruvi\`
+  (`lastfolder` = Pictures, `thumbnailsize = "160x160"`)
+- conflict handling as above; quiet MSI: `CONFLICTACTION=Overwrite|Keep`;
+  script: `-ConflictAction …`
+- add a Start Menu shortcut
+
+Uninstall: `msiexec /x …` or `uninstall.ps1` (add `-RemoveConfig` to delete
+config/parsers).
+
+### macOS and Linux (and Windows from source)
 
 Install the current stable Rust toolchain from [rustup](https://rustup.rs/), then
 clone or download this project and run:
 
-```powershell
+```bash
 cargo run --release -- <folder-with-images>
 ```
 
-Alternatively, use **Open folder** in the app. Original images are never written.
-The only files comruvi creates are PNG thumbnails under the selected folder's
-`.thumbnails` directory. Their names follow Geeqie's compatible convention:
-`image.jpg` becomes `.thumbnails/image.jpg.png`.
+On Windows PowerShell the same command works. Alternatively, use **Open folder**
+in the app after launch. Original images are never written. The only files
+comruvi creates are PNG thumbnails under the selected folder's `.thumbnails`
+directory. Their names follow Geeqie's compatible convention: `image.jpg`
+becomes `.thumbnails/image.jpg.png`.
 
-Supported input formats in this alpha release are PNG, JPG, and JPEG. The project
-has been successfully compiled and run on **Windows** and on **Fedora Linux 44**.
+Supported input formats in this alpha release are PNG, JPG, and JPEG.
 
 ## Using the viewer
 
 - The **Folders** pane is a tree with its own scrollbar. Click a name to open that
-  folder; use ▸/▾ to expand or collapse. **↑ Up** moves to the parent. The lower
-  **Favorite places** area provides persistent shortcuts.
+  folder; use the chevron controls to expand or collapse. **Up** (with arrow icon)
+  moves to the parent. The lower **Favorite places** area provides persistent
+  shortcuts.
 - Choose **Thumbnails** for a grid or **Filmstrip** for the selected image plus a
   centered thumbnail strip. Click an image to select it; double-click to open the
   separate viewer window. **Left/Right** move the selection in both modes;
@@ -57,7 +102,7 @@ has been successfully compiled and run on **Windows** and on **Fedora Linux 44**
 
 comruvi creates a readable TOML configuration at
 `~/.config/comruvi/config.toml` (on Windows, `%USERPROFILE%\.config\comruvi\config.toml`).
-It records `version = 0.05`, the last opened folder, `parserdir` (directory of
+It records `version = 0.06`, the last opened folder, `parserdir` (directory of
 translator files), and up to ten favorites as `quick0` through `quick9`; unused
 quick keys are omitted. It also writes the reserved future settings
 `thumbnailsize`, `fonttype`, `fontsize`, and `displaymode`. The lower part of
@@ -99,9 +144,10 @@ convention are intentionally compatible with [Geeqie](https://github.com/BestIma
 
 ## Current status
 
-**Alpha 5 (0.05).** Implemented: folder tree with independent scroll, persistent
+**Alpha 6 (0.06).** Implemented: folder tree with independent scroll, persistent
 favorites, thumbnail grid, filmstrip, live folder watching, Shift+drag to ComfyUI,
 Home/End navigation, background thumbnail generation, modular metadata
-translators (ComfyUI + EXIF photo), JPEG orientation-aware display, and a
-synchronized secondary viewer window with zoom/pan. See
+translators (ComfyUI + EXIF photo), JPEG orientation-aware display, a
+synchronized secondary viewer window with zoom/pan, and a Windows MSI installer
+(alpha warning, AGPL license, config conflict handling). See
 [CHANGELOG.md](CHANGELOG.md) for the detailed history.

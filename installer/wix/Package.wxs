@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Per-user MSI for comruvi (WiX Toolset 5).
+  Binary  -> %LOCALAPPDATA%\comruvi\
+  Config  -> %USERPROFILE%\.config\comruvi\  (via Install-Config.ps1)
+  Parsers -> %USERPROFILE%\.config\comruvi\parsers\
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+
+  <Package
+      Name="comruvi"
+      Manufacturer="astolzen"
+      Version="$(var.ProductVersion)"
+      UpgradeCode="B8E4F1A2-3C5D-4E6F-9A1B-2C3D4E5F6A7B"
+      Scope="perUser"
+      Compressed="yes"
+      Language="1033">
+
+    <SummaryInformation Description="comruvi - ComfyUI Rust Viewer" />
+
+    <MajorUpgrade
+        DowngradeErrorMessage="A newer version of comruvi is already installed." />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Keep (default for quiet installs) | Overwrite -->
+    <Property Id="CONFLICTACTION" Value="Keep" />
+
+    <!-- AGPL-3.0 in the WiX license agreement page -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseRtf)" />
+
+    <Binary Id="ComruviIconBmp" SourceFile="$(var.IconBmp)" />
+
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="comruvi">
+        <Directory Id="PAYLOADFOLDER" Name="payload">
+          <Directory Id="PARSERSFOLDER" Name="parsers" />
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <StandardDirectory Id="System64Folder" />
+
+    <ComponentGroup Id="ProductComponents">
+      <Component Id="MainExe" Directory="INSTALLFOLDER" Guid="C1A2B3D4-E5F6-7890-A1B2-C3D4E5F60708">
+        <File Id="ComruviExe" Source="$(var.ExeSource)" Name="comruvi.exe" />
+        <Shortcut
+            Id="StartMenuShortcut"
+            Name="comruvi"
+            Directory="ProgramMenuFolder"
+            WorkingDirectory="INSTALLFOLDER"
+            Advertise="no"
+            Description="comruvi - ComfyUI Rust Viewer" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
+        <RegistryValue
+            Root="HKCU"
+            Key="Software\comruvi"
+            Name="InstallFolder"
+            Type="string"
+            Value="[INSTALLFOLDER]"
+            KeyPath="yes" />
+      </Component>
+
+      <Component Id="PayloadScripts" Directory="PAYLOADFOLDER" Guid="D2B3C4E5-F607-8910-B2C3-D4E5F6070819">
+        <File Id="InstallConfigPs1" Source="$(var.ConfigScript)" Name="Install-Config.ps1" />
+        <File Id="RunConfigCmd" Source="$(var.RunConfigCmd)" Name="run-config.cmd" />
+        <File Id="VersionTxt" Source="$(var.VersionFile)" Name="version.txt" />
+        <RegistryValue
+            Root="HKCU"
+            Key="Software\comruvi"
+            Name="Payload"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+      </Component>
+
+      <ComponentGroupRef Id="ParserComponents" />
+    </ComponentGroup>
+
+    <Feature Id="Main" Title="comruvi" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+
+    <UI>
+      <TextStyle Id="AlphaTitleFont" FaceName="Tahoma" Size="14" Bold="yes" />
+      <TextStyle Id="AlphaBodyFont" FaceName="Tahoma" Size="9" />
+
+      <Dialog Id="AlphaWarningDlg" Width="420" Height="300" Title="comruvi Setup - Early Alpha Warning">
+        <Control Id="Icon" Type="Bitmap" X="20" Y="18" Width="64" Height="64" Text="ComruviIconBmp" />
+        <Control Id="AppName" Type="Text" X="100" Y="28" Width="300" Height="28" Transparent="yes" NoPrefix="yes"
+                 Text="{\AlphaTitleFont}Comruvi" />
+        <Control Id="Warning" Type="Text" X="20" Y="100" Width="380" Height="90" Transparent="yes" NoPrefix="yes"
+                 Text="{\AlphaBodyFont}You are about to install an early alpha version of this vibe coded tool. The author takes no responsibility for any damage this tool might cause on your system. For details of this build, visit:" />
+        <Control Id="GitHubLink" Type="Hyperlink" X="20" Y="195" Width="380" Height="24"
+                 Text="&lt;a href=&quot;https://github.com/astolzen/comruvi&quot;&gt;https://github.com/astolzen/comruvi&lt;/a&gt;" />
+        <Control Id="Accept" Type="PushButton" X="230" Y="260" Width="80" Height="22" Default="yes" Text="&amp;Accept">
+          <Publish Event="NewDialog" Value="WelcomeEulaDlg" Condition="1" />
+        </Control>
+        <Control Id="Decline" Type="PushButton" X="320" Y="260" Width="80" Height="22" Cancel="yes" Text="&amp;Decline">
+          <Publish Event="EndDialog" Value="Exit" Condition="1" />
+        </Control>
+      </Dialog>
+    </UI>
+
+    <!--
+      UI-sequence prompt when config/parsers already exist.
+      Yes = Overwrite, No = Keep. Quiet installs keep the default (Keep).
+    -->
+    <CustomAction
+        Id="AskConflictUI"
+        Script="vbscript"
+        ScriptSourceFile="$(var.AskConflictVbs)"
+        Execute="immediate" />
+
+    <InstallUISequence>
+      <Show Dialog="AlphaWarningDlg" Before="WelcomeEulaDlg" Condition="NOT Installed AND UILevel &gt; 2" />
+      <Custom Action="AskConflictUI" After="CostFinalize" Condition="NOT Installed AND UILevel &gt; 2" />
+    </InstallUISequence>
+
+    <!--
+      InstallFinalize performs the actual FileCopy. Schedule config merge after
+      that, via cmd wrapper (reliable under msiexec).
+    -->
+    <SetProperty
+        Id="CMDEXE"
+        Value="[System64Folder]cmd.exe"
+        Before="ConfigInstall"
+        Sequence="execute" />
+
+    <CustomAction
+        Id="ConfigInstall"
+        Property="CMDEXE"
+        ExeCommand="/c &quot;&quot;[PAYLOADFOLDER]run-config.cmd&quot; &quot;[CONFLICTACTION]&quot; &quot;$(var.ProductVersion)&quot;&quot;"
+        Execute="immediate"
+        Return="ignore"
+        Impersonate="yes" />
+
+    <InstallExecuteSequence>
+      <Custom Action="ConfigInstall" After="InstallFinalize" Condition="NOT REMOVE" />
+    </InstallExecuteSequence>
+
+    <ui:WixUI Id="WixUI_Minimal" />
+  </Package>
+</Wix>
