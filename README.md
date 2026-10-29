@@ -30,9 +30,9 @@ powershell -ExecutionPolicy Bypass -File .\installer\pack-windows.ps1
 **MSI:** `dist/comruvi-<version>-windows-x64.msi`
 
 ```powershell
-msiexec /i dist\comruvi-0.0.9-windows-x64.msi
+msiexec /i dist\comruvi-0.0.91-windows-x64.msi
 # quiet, keep existing config/parsers:
-msiexec /i dist\comruvi-0.0.9-windows-x64.msi CONFLICTACTION=Keep /qn
+msiexec /i dist\comruvi-0.0.91-windows-x64.msi CONFLICTACTION=Keep /qn
 ```
 
 The installer shows an early-alpha Accept/Decline warning, then the **AGPL-3.0**
@@ -121,7 +121,7 @@ Supported input formats in this alpha release are PNG, JPG, and JPEG.
 
 comruvi creates a readable TOML configuration at
 `~/.config/comruvi/config.toml` (on Windows, `%USERPROFILE%\.config\comruvi\config.toml`).
-It records `version = 0.09`, the last opened folder, `parserdir` (directory of
+It records `version = 0.091`, the last opened folder, `parserdir` (directory of
 translator files), and up to ten favorites as `quick0` through `quick9`; unused
 quick keys are omitted. It also writes the reserved future settings
 `thumbnailsize`, `fonttype`, `fontsize`, and `displaymode`. The lower part of
@@ -164,11 +164,11 @@ Comruvi is an independed project and not affiliated with ComfyUI. It does neithe
 
 ## Current status
 
-**Alpha 9 (0.09).** Implemented: folder tree with independent scroll, persistent
-favorites, thumbnail grid, filmstrip, live folder watching, Shift+drag to ComfyUI,
-Home/End navigation, background thumbnail and `.metadata` cache generation,
-modular metadata translators (ComfyUI + EXIF photo), JPEG orientation-aware
-display, a synchronized secondary viewer window with zoom/pan, Windows MSI
-installer, embedded taskbar icon, file-association / single-instance open, and
-toolbar **Filter** (full text + active-LoRA filters). See
-[CHANGELOG.md](CHANGELOG.md) for the detailed history.
+**0.091.** Implemented: folder tree with independent scroll, persistent favorites,
+thumbnail grid, filmstrip, live folder watching, Shift+drag to ComfyUI, Home/End
+navigation, background thumbnail and `.metadata` cache generation, modular
+metadata translators (ComfyUI + EXIF photo), human-readable camera EXIF
+(aperture/shutter/focal length), a synchronized secondary viewer window with
+zoom/pan (title shows file name), Windows MSI installer, embedded taskbar icon,
+file-association / single-instance open, and toolbar **Filter** (full text +
+active-LoRA filters). See [CHANGELOG.md](CHANGELOG.md) for the detailed history.

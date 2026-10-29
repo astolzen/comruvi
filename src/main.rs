@@ -1243,9 +1243,18 @@ fn viewer_ui(ctx: &EguiContext, app: &mut App) {
     let texture = app.image_texture.clone();
     let mut close_requested = false;
     let mut start_file_drag = false;
+    let viewer_title = app
+        .selected_path()
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| format!("comruvi — {}", name.to_string_lossy()))
+        })
+        .unwrap_or_else(|| "comruvi — viewer".into());
     ctx.show_viewport_immediate(
         egui::ViewportId::from_hash_of("separate-viewer"),
-        egui::ViewportBuilder::default().with_title("comruvi — viewer").with_inner_size([1000.0, 750.0]),
+        egui::ViewportBuilder::default()
+            .with_title(viewer_title)
+            .with_inner_size([1000.0, 750.0]),
         |viewer_ctx, _| {
             close_requested = viewer_ctx.input(|input| input.viewport().close_requested());
             egui::CentralPanel::default().show(viewer_ctx, |ui| {

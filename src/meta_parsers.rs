@@ -660,7 +660,7 @@ fn read_exif_map(path: &Path) -> Result<BTreeMap<String, String>> {
     let mut map = BTreeMap::new();
     for (name, tag) in EXIF_TAGS {
         if let Some(field) = exif.get_field(*tag, In::PRIMARY).or_else(|| exif.get_field(*tag, In::THUMBNAIL)) {
-            if let Some(text) = format_exif_value(&field.value) {
+            if let Some(text) = format_exif_value(*tag, &field.value) {
                 map.insert((*name).into(), text);
             }
         }
@@ -668,7 +668,7 @@ fn read_exif_map(path: &Path) -> Result<BTreeMap<String, String>> {
     // ISO often lives only under the Exif IFD; kamadak exposes it via PRIMARY when present.
     if !map.contains_key("PhotographicSensitivity") {
         if let Some(field) = exif.get_field(Tag::PhotographicSensitivity, In::PRIMARY) {
-            if let Some(text) = format_exif_value(&field.value) {
+            if let Some(text) = format_exif_value(Tag::PhotographicSensitivity, &field.value) {
                 map.insert("PhotographicSensitivity".into(), text.clone());
                 map.entry("ISO".into()).or_insert(text);
             }
@@ -695,32 +695,99 @@ const EXIF_TAGS: &[(&str, Tag)] = &[
     ("Orientation", Tag::Orientation),
 ];
 
-fn format_exif_value(value: &ExifValue) -> Option<String> {
+fn format_exif_value(tag: Tag, value: &ExifValue) -> Option<String> {
     match value {
         ExifValue::Ascii(items) => {
             let text = items.iter().flat_map(|b| std::str::from_utf8(b).ok()).collect::<Vec<_>>().join(" ");
             let text = text.trim().trim_end_matches('\0').to_owned();
             (!text.is_empty()).then_some(text)
         }
-        ExifValue::Rational(items) if !items.is_empty() => Some(format_rational(items[0].num, items[0].denom)),
-        ExifValue::SRational(items) if !items.is_empty() => Some(format_rational(items[0].num.unsigned_abs() as u32, items[0].denom.unsigned_abs().max(1))),
+        ExifValue::Rational(items) if !items.is_empty() => {
+            Some(format_exif_rational(tag, items[0].num, items[0].denom))
+        }
+        ExifValue::SRational(items) if !items.is_empty() => Some(format_exif_rational(
+            tag,
+            items[0].num.unsigned_abs() as u32,
+            items[0].denom.unsigned_abs().max(1),
+        )),
         ExifValue::Short(items) if !items.is_empty() => Some(items[0].to_string()),
         ExifValue::Long(items) if !items.is_empty() => Some(items[0].to_string()),
         _ => {
-            let display = value.display_as(Tag::ImageDescription).to_string();
+            let display = value.display_as(tag).to_string();
             let display = display.trim().to_owned();
             (!display.is_empty()).then_some(display)
         }
     }
 }
 
-fn format_rational(num: u32, denom: u32) -> String {
-    if denom == 0 { return num.to_string(); }
-    if num >= denom && num % denom == 0 { return (num / denom).to_string(); }
-    // Prefer photographic forms for shutter (1/x) and leave others as reduced fractions.
-    if num == 1 || denom > num { return format!("{num}/{denom}"); }
+/// Format EXIF rationals for humans: f-stops, shutter 1/N, focal length in mm.
+fn format_exif_rational(tag: Tag, num: u32, denom: u32) -> String {
+    if denom == 0 {
+        return num.to_string();
+    }
+    let value = num as f64 / denom as f64;
+    match tag {
+        Tag::FNumber => format_fnumber(value),
+        Tag::ExposureTime => format_exposure_time(value),
+        Tag::FocalLength => format_focal_mm(value),
+        _ => format_generic_rational(num, denom),
+    }
+}
+
+fn format_fnumber(v: f64) -> String {
+    if !v.is_finite() || v <= 0.0 {
+        return "?".into();
+    }
+    if (v * 10.0).round() % 10.0 == 0.0 {
+        format!("f/{:.0}", v)
+    } else {
+        format!("f/{:.1}", v)
+    }
+}
+
+fn format_exposure_time(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return "?".into();
+    }
+    if seconds >= 1.0 {
+        if (seconds - seconds.round()).abs() < 0.05 {
+            format!("{} s", seconds.round() as i64)
+        } else {
+            format!("{seconds:.1} s")
+        }
+    } else {
+        // Phones often store awkward fractions (e.g. 77339/1e8); show classic 1/N.
+        let inv = (1.0 / seconds).round().max(1.0);
+        format!("1/{inv:.0}")
+    }
+}
+
+fn format_focal_mm(v: f64) -> String {
+    if !v.is_finite() || v <= 0.0 {
+        return "?".into();
+    }
+    if (v * 10.0).round() % 10.0 == 0.0 {
+        format!("{:.0} mm", v)
+    } else {
+        format!("{:.1} mm", v)
+    }
+}
+
+fn format_generic_rational(num: u32, denom: u32) -> String {
+    if denom == 0 {
+        return num.to_string();
+    }
+    if num >= denom && num % denom == 0 {
+        return (num / denom).to_string();
+    }
     let g = gcd(num, denom);
-    format!("{}/{}", num / g, denom / g)
+    let n = num / g;
+    let d = denom / g;
+    if d == 1 {
+        n.to_string()
+    } else {
+        format!("{n}/{d}")
+    }
 }
 
 fn gcd(mut a: u32, mut b: u32) -> u32 {
@@ -774,5 +841,43 @@ mod tests {
         let meta = read_metadata(&photo, &parsers()).unwrap();
         assert!(meta.fields.iter().any(|(k, v)| k == "Kamera" && v.contains("EOS R8")));
         assert!(meta.fields.iter().any(|(k, _)| k == "ISO"));
+    }
+
+    #[test]
+    fn formats_photo_exif_rationals() {
+        assert_eq!(format_exif_rational(Tag::FNumber, 28, 5), "f/5.6");
+        assert_eq!(format_exif_rational(Tag::FNumber, 17, 10), "f/1.7");
+        assert_eq!(format_exif_rational(Tag::FNumber, 8, 1), "f/8");
+        assert_eq!(format_exif_rational(Tag::ExposureTime, 1, 400), "1/400");
+        assert_eq!(format_exif_rational(Tag::ExposureTime, 77339, 100_000_000), "1/1293");
+        assert_eq!(format_exif_rational(Tag::FocalLength, 200, 1), "200 mm");
+        assert_eq!(format_exif_rational(Tag::FocalLength, 63, 10), "6.3 mm");
+    }
+
+    #[test]
+    fn formats_canon_and_samsung_samples_when_present() {
+        let album = PathBuf::from(r"F:\sync\Pictures\Album\2026\291027 Vilsalpsee");
+        let canon = album.join("IMG_3223.JPG");
+        let samsung = album.join("20261027_125134.jpg");
+        if !canon.is_file() || !samsung.is_file() {
+            return;
+        }
+        let parsers = parsers();
+        let canon_meta = read_metadata(&canon, &parsers).unwrap();
+        assert_eq!(field(&canon_meta, "Aperture").as_deref(), Some("f/5.6"));
+        assert_eq!(field(&canon_meta, "Shutter Speed").as_deref(), Some("1/400"));
+        assert_eq!(field(&canon_meta, "Focal Length").as_deref(), Some("200 mm"));
+
+        let phone_meta = read_metadata(&samsung, &parsers).unwrap();
+        assert_eq!(field(&phone_meta, "Aperture").as_deref(), Some("f/1.7"));
+        assert_eq!(field(&phone_meta, "Shutter Speed").as_deref(), Some("1/1293"));
+        assert_eq!(field(&phone_meta, "Focal Length").as_deref(), Some("6.3 mm"));
+    }
+
+    fn field(meta: &Metadata, label: &str) -> Option<String> {
+        meta.fields
+            .iter()
+            .find(|(key, _)| key == label)
+            .map(|(_, value)| value.clone())
     }
 }

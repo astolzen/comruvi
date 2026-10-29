@@ -2,6 +2,22 @@
 
 All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
+## 0.091-alpha — 2026-10-29
+
+### Added
+
+- Separate viewer window title shows the current image file name.
+
+### Fixed
+
+- Camera EXIF display: aperture as `f/5.6`, shutter as `1/400`, focal length as
+  `200 mm` (Canon/Samsung and other phones no longer show raw fractions like
+  `28/5` or `77339/100000000`).
+
+### Changed
+
+- Config writes `version = 0.091`.
+
 ## 0.09-alpha (Alpha 9) — 2026-10-28
 
 ### Added
