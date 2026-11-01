@@ -21,9 +21,9 @@ use arboard::Clipboard;
 use eframe::egui::{self, ColorImage, Context as EguiContext, Image, ScrollArea, TextureHandle, TextureOptions, Vec2};
 use image::imageops::FilterType;
 use meta_parsers::{
-    default_parser_dir, exif_orientation, image_has_active_lora, image_matches_volltext,
-    load_parsers, metadata_cache_is_stale, read_metadata, write_image_metadata_cache, Metadata,
-    ParserConfig,
+    default_parser_dir, display_orientation, image_has_active_lora, image_matches_volltext,
+    load_parsers, metadata_cache_is_stale, read_metadata, set_cached_orientation,
+    write_image_metadata_cache, Metadata, ParserConfig,
 };
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -639,8 +639,39 @@ impl App {
         self.film_view.reset(); self.viewer_view.reset();
         let path = self.entries[index].path.clone();
         self.metadata = read_metadata(&path, &self.parsers).unwrap_or_else(|e| Metadata::error(e.to_string()));
-        if let Ok(image) = load_image(&path) { self.image_texture = Some(ctx.load_texture("full-image", image, TextureOptions::default())); }
+        self.reload_selected_texture(ctx);
     }
+
+    fn reload_selected_texture(&mut self, ctx: &EguiContext) {
+        let Some(path) = self.selected_path() else {
+            self.image_texture = None;
+            return;
+        };
+        self.image_texture = load_display_image(&path)
+            .ok()
+            .map(|image| ctx.load_texture("full-image", image, TextureOptions::default()));
+    }
+
+    /// Rotate the selected image by `steps_cw` quarter-turns (mod 4). Updates
+    /// `.metadata` orientation and regenerates the thumbnail; original file untouched.
+    fn rotate_selected(&mut self, steps_cw: u8, ctx: &EguiContext) {
+        let Some(path) = self.selected_path() else { return; };
+        let next = (display_orientation(&path) + steps_cw) % 4;
+        if let Err(error) = set_cached_orientation(&path, next) {
+            self.notice = Some(format!("Could not save orientation: {error}"));
+            return;
+        }
+        let thumb = thumbnail_path(&path);
+        if let Err(error) = create_thumbnail(&path, &thumb) {
+            self.notice = Some(format!("Could not update thumbnail: {error}"));
+        }
+        self.thumb_textures.remove(&path);
+        self.film_view.reset();
+        self.viewer_view.reset();
+        self.reload_selected_texture(ctx);
+        self.notice = Some(format!("Orientation {next} (0–3, 90° CW steps)"));
+    }
+
     fn thumbnail(&mut self, entry: &Entry, ctx: &EguiContext) -> Option<TextureHandle> {
         if let Some(t) = self.thumb_textures.get(&entry.path) { return Some(t.clone()); }
         let thumb = thumbnail_path(&entry.path);
@@ -653,7 +684,8 @@ impl App {
             return None;
         }
         self.thumb_loads_left -= 1;
-        let image = load_image(&thumb).ok()?;
+        // Thumbnails are already orientation-baked PNGs — load pixels as-is.
+        let image = load_raw_image(&thumb).ok()?;
         let texture = ctx.load_texture(format!("thumb-{}", entry.path.display()), image, TextureOptions::default());
         self.thumb_textures.insert(entry.path.clone(), texture.clone()); Some(texture)
     }
@@ -914,6 +946,16 @@ impl eframe::App for App {
             let step = self.thumb_columns.max(1) as isize;
             if ctx.input(|input| input.key_pressed(egui::Key::ArrowUp)) { self.navigate(-step, ctx); }
             if ctx.input(|input| input.key_pressed(egui::Key::ArrowDown)) { self.navigate(step, ctx); }
+        }
+        // 3 = 90° CW, 2 = 90° CCW — filmstrip main view or separate viewer only.
+        // Skip while a text field (e.g. Filter) wants the keyboard.
+        if !ctx.wants_keyboard_input() && (self.mode == Mode::Filmstrip || self.viewer_open) {
+            if ctx.input(|input| input.key_pressed(egui::Key::Num3)) {
+                self.rotate_selected(1, ctx);
+            }
+            if ctx.input(|input| input.key_pressed(egui::Key::Num2)) {
+                self.rotate_selected(3, ctx);
+            }
         }
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1240,9 +1282,10 @@ fn filmstrip_ui(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
 }
 
 fn viewer_ui(ctx: &EguiContext, app: &mut App) {
-    let texture = app.image_texture.clone();
     let mut close_requested = false;
     let mut start_file_drag = false;
+    let mut rotate_cw = false;
+    let mut rotate_ccw = false;
     let viewer_title = app
         .selected_path()
         .and_then(|path| {
@@ -1257,6 +1300,12 @@ fn viewer_ui(ctx: &EguiContext, app: &mut App) {
             .with_inner_size([1000.0, 750.0]),
         |viewer_ctx, _| {
             close_requested = viewer_ctx.input(|input| input.viewport().close_requested());
+            // Keys land on this viewport when it has focus — not the main window.
+            if !viewer_ctx.wants_keyboard_input() {
+                rotate_cw = viewer_ctx.input(|input| input.key_pressed(egui::Key::Num3));
+                rotate_ccw = viewer_ctx.input(|input| input.key_pressed(egui::Key::Num2));
+            }
+            let texture = app.image_texture.clone();
             egui::CentralPanel::default().show(viewer_ctx, |ui| {
                 if let Some(t) = &texture {
                     if zoomable_image(ui, t, &mut app.viewer_view, ui.available_size(), true) {
@@ -1268,6 +1317,12 @@ fn viewer_ui(ctx: &EguiContext, app: &mut App) {
             });
         },
     );
+    // Apply after the viewport callback so we can reload textures on the root ctx.
+    if rotate_cw {
+        app.rotate_selected(1, ctx);
+    } else if rotate_ccw {
+        app.rotate_selected(3, ctx);
+    }
     if start_file_drag {
         if let Some(path) = app.selected_path() { app.queue_file_drag(path); }
     }
@@ -1299,7 +1354,7 @@ fn about_ui(ctx: &EguiContext, app: &mut App) {
                     ui.add_space(12.0);
                     ui.label(egui::RichText::new("Comruvi").strong().size(32.0));
                     ui.add_space(6.0);
-                    ui.label(format!("Version {APP_VERSION}"));
+                    ui.label(format!("Version {APP_VERSION} beta"));
                     ui.add_space(12.0);
                     ui.hyperlink_to("github.com/astolzen/comruvi", GITHUB_URL);
                 });
@@ -1457,40 +1512,44 @@ fn folder_event_relevant(event: &Event, watched_folder: Option<&Path>) -> bool {
 
 fn is_image(p: &Path) -> bool { matches!(p.extension().and_then(|x| x.to_str()).map(|x| x.to_ascii_lowercase()).as_deref(), Some("png" | "jpg" | "jpeg")) }
 fn thumbnail_path(image: &Path) -> PathBuf { image.parent().unwrap_or(Path::new(".")).join(".thumbnails").join(format!("{}.png", image.file_name().unwrap_or_default().to_string_lossy())) }
+
+/// Build a thumbnail using the display orientation (EXIF-derived or user-adjusted
+/// in `.metadata`), and ensure that orientation is stored in the sidecar.
 fn create_thumbnail(source: &Path, destination: &Path) -> Result<()> {
-    let img = open_oriented(source).with_context(|| format!("opening {}", source.display()))?;
+    let quarters = display_orientation(source);
+    let _ = set_cached_orientation(source, quarters);
+    let img = open_with_quarters(source, quarters)
+        .with_context(|| format!("opening {}", source.display()))?;
     if let Some(p) = destination.parent() { fs::create_dir_all(p)?; }
-    img.resize(THUMB_SIZE, THUMB_SIZE, FilterType::Lanczos3).save_with_format(destination, image::ImageFormat::Png)?;
+    img.resize(THUMB_SIZE, THUMB_SIZE, FilterType::Lanczos3)
+        .save_with_format(destination, image::ImageFormat::Png)?;
     Ok(())
 }
-fn load_image(path: &Path) -> Result<ColorImage> {
-    let img = open_oriented(path)?.to_rgba8();
+
+fn load_raw_image(path: &Path) -> Result<ColorImage> {
+    let img = image::open(path)?.to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
     Ok(ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
 }
 
-/// Open an image and apply JPEG EXIF Orientation so portrait shots are not shown sideways.
-fn open_oriented(path: &Path) -> Result<image::DynamicImage> {
-    let img = image::open(path)?;
-    Ok(apply_exif_orientation(img, exif_orientation(path)))
+fn load_display_image(path: &Path) -> Result<ColorImage> {
+    let img = open_with_quarters(path, display_orientation(path))?.to_rgba8();
+    let size = [img.width() as usize, img.height() as usize];
+    Ok(ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
 }
 
-fn apply_exif_orientation(img: image::DynamicImage, orientation: u32) -> image::DynamicImage {
-    use image::imageops::{self, flip_horizontal, flip_vertical};
-    match orientation {
-        2 => image::DynamicImage::ImageRgba8(flip_horizontal(&img)),
-        3 => image::DynamicImage::ImageRgba8(imageops::rotate180(&img)),
-        4 => image::DynamicImage::ImageRgba8(flip_vertical(&img)),
-        5 => {
-            let rotated = imageops::rotate90(&img);
-            image::DynamicImage::ImageRgba8(flip_horizontal(&rotated))
-        }
-        6 => image::DynamicImage::ImageRgba8(imageops::rotate90(&img)),
-        7 => {
-            let rotated = imageops::rotate270(&img);
-            image::DynamicImage::ImageRgba8(flip_horizontal(&rotated))
-        }
-        8 => image::DynamicImage::ImageRgba8(imageops::rotate270(&img)),
+fn open_with_quarters(path: &Path, quarters: u8) -> Result<image::DynamicImage> {
+    let img = image::open(path)?;
+    Ok(apply_quarter_turns(img, quarters % 4))
+}
+
+/// Rotate `img` by `quarters` × 90° clockwise.
+fn apply_quarter_turns(img: image::DynamicImage, quarters: u8) -> image::DynamicImage {
+    use image::imageops;
+    match quarters % 4 {
+        1 => image::DynamicImage::ImageRgba8(imageops::rotate90(&img)),
+        2 => image::DynamicImage::ImageRgba8(imageops::rotate180(&img)),
+        3 => image::DynamicImage::ImageRgba8(imageops::rotate270(&img)),
         _ => img,
     }
 }

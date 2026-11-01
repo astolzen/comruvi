@@ -2,6 +2,24 @@
 
 All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
+## 0.1.0-beta — 2026-11-01
+
+First beta release (package version `0.1.0`).
+
+### Added
+
+- JPG EXIF Orientation drives display and thumbnail creation (portrait/landscape).
+- `.metadata` sidecars store `orientation` (0–3, 90° CW steps from raw pixels);
+  cache format version is 3.
+- Keys **3** / **2** in Filmstrip and the fullscreen viewer rotate the selection
+  90° clockwise / counterclockwise without rewriting the original file; the
+  sidecar and thumbnail are updated to match.
+
+### Changed
+
+- Config writes `version = 0.10`.
+- Installer warning dialog wording updated from early-alpha to beta.
+
 ## 0.091-alpha — 2026-10-29
 
 ### Added

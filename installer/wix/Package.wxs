@@ -90,12 +90,12 @@
       <TextStyle Id="AlphaTitleFont" FaceName="Tahoma" Size="14" Bold="yes" />
       <TextStyle Id="AlphaBodyFont" FaceName="Tahoma" Size="9" />
 
-      <Dialog Id="AlphaWarningDlg" Width="420" Height="300" Title="comruvi Setup - Early Alpha Warning">
+      <Dialog Id="AlphaWarningDlg" Width="420" Height="300" Title="comruvi Setup - Beta Warning">
         <Control Id="Icon" Type="Bitmap" X="20" Y="18" Width="64" Height="64" Text="ComruviIconBmp" />
         <Control Id="AppName" Type="Text" X="100" Y="28" Width="300" Height="28" Transparent="yes" NoPrefix="yes"
                  Text="{\AlphaTitleFont}Comruvi" />
         <Control Id="Warning" Type="Text" X="20" Y="100" Width="380" Height="90" Transparent="yes" NoPrefix="yes"
-                 Text="{\AlphaBodyFont}You are about to install an early alpha version of this vibe coded tool. The author takes no responsibility for any damage this tool might cause on your system. For details of this build, visit:" />
+                 Text="{\AlphaBodyFont}You are about to install a beta version of this vibe coded tool. The author takes no responsibility for any damage this tool might cause on your system. For details of this build, visit:" />
         <Control Id="GitHubLink" Type="Hyperlink" X="20" Y="195" Width="380" Height="24"
                  Text="&lt;a href=&quot;https://github.com/astolzen/comruvi&quot;&gt;https://github.com/astolzen/comruvi&lt;/a&gt;" />
         <Control Id="Accept" Type="PushButton" X="230" Y="260" Width="80" Height="22" Default="yes" Text="&amp;Accept">

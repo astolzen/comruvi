@@ -752,7 +752,7 @@ dependencies = [
 
 [[package]]
 name = "comruvi"
-version = "0.0.91"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",

@@ -30,12 +30,12 @@ powershell -ExecutionPolicy Bypass -File .\installer\pack-windows.ps1
 **MSI:** `dist/comruvi-<version>-windows-x64.msi`
 
 ```powershell
-msiexec /i dist\comruvi-0.0.91-windows-x64.msi
+msiexec /i dist\comruvi-0.1.0-windows-x64.msi
 # quiet, keep existing config/parsers:
-msiexec /i dist\comruvi-0.0.91-windows-x64.msi CONFLICTACTION=Keep /qn
+msiexec /i dist\comruvi-0.1.0-windows-x64.msi CONFLICTACTION=Keep /qn
 ```
 
-The installer shows an early-alpha Accept/Decline warning, then the **AGPL-3.0**
+The installer shows a beta Accept/Decline warning, then the **AGPL-3.0**
 license. If config/parsers already exist, a Yes/No dialog appears:
 **Yes = Overwrite** (dated backup), **No = Keep** (installer copies named with the
 build version).
@@ -76,7 +76,7 @@ comruvi may create:
   `.metadata/image.png.json`), built in the background like thumbnails and
   rebuilt via **Recreate → Metadata**
 
-Supported input formats in this alpha release are PNG, JPG, and JPEG.
+Supported input formats in this beta release are PNG, JPG, and JPEG.
 
 ## Using the viewer
 
@@ -108,20 +108,22 @@ Supported input formats in this alpha release are PNG, JPG, and JPEG.
   dropping from Explorer or Digikam.
 - In the filmstrip image and separate viewer, scroll the mouse wheel or press
   **Up/Down** to zoom, and drag with the mouse to pan. Press **0** to reset to fit
-  window or **1** for 100% (actual-pixel) zoom. Filmstrip mode shows the current
+  window or **1** for 100% (actual-pixel) zoom. Press **3** / **2** to rotate the
+  view 90° clockwise / counterclockwise (updates `.metadata` orientation and the
+  thumbnail; the original file is unchanged). Filmstrip mode shows the current
   zoom level in the top toolbar.
 - The metadata pane is driven by **translator** files: each image is matched to a
   parser config by a trigger, then the right pane shows the configured fields.
   Copy buttons place values on the system clipboard.
-- **Recreate thumbnails** performs work in the background. A progress indicator is
-  displayed while thumbnails are created or updated. JPEG EXIF orientation is
-  applied for filmstrip, the separate viewer, and newly built thumbnails.
+- **Recreate → Thumbnails** / **Metadata** runs in the background with a progress
+  indicator. JPEG EXIF Orientation (and any user rotation stored in `.metadata`)
+  is applied for filmstrip, the separate viewer, and newly built thumbnails.
 
 ## Settings and favorite places
 
 comruvi creates a readable TOML configuration at
 `~/.config/comruvi/config.toml` (on Windows, `%USERPROFILE%\.config\comruvi\config.toml`).
-It records `version = 0.091`, the last opened folder, `parserdir` (directory of
+It records `version = 0.10`, the last opened folder, `parserdir` (directory of
 translator files), and up to ten favorites as `quick0` through `quick9`; unused
 quick keys are omitted. It also writes the reserved future settings
 `thumbnailsize`, `fonttype`, `fontsize`, and `displaymode`. The lower part of
@@ -164,11 +166,12 @@ Comruvi is an independed project and not affiliated with ComfyUI. It does neithe
 
 ## Current status
 
-**0.091.** Implemented: folder tree with independent scroll, persistent favorites,
-thumbnail grid, filmstrip, live folder watching, Shift+drag to ComfyUI, Home/End
-navigation, background thumbnail and `.metadata` cache generation, modular
-metadata translators (ComfyUI + EXIF photo), human-readable camera EXIF
-(aperture/shutter/focal length), a synchronized secondary viewer window with
-zoom/pan (title shows file name), Windows MSI installer, embedded taskbar icon,
-file-association / single-instance open, and toolbar **Filter** (full text +
-active-LoRA filters). See [CHANGELOG.md](CHANGELOG.md) for the detailed history.
+**0.1.0 beta.** Implemented: folder tree with independent scroll, persistent
+favorites, thumbnail grid, filmstrip, live folder watching, Shift+drag to ComfyUI,
+Home/End navigation, background thumbnail and `.metadata` cache generation,
+modular metadata translators (ComfyUI + EXIF photo), human-readable camera EXIF
+(aperture/shutter/focal length), EXIF/manual orientation (keys **2**/**3**), a
+synchronized secondary viewer window with zoom/pan (title shows file name),
+Windows MSI installer, embedded taskbar icon, file-association / single-instance
+open, and toolbar **Filter** (full text + active-LoRA filters). See
+[CHANGELOG.md](CHANGELOG.md) for the detailed history.
