@@ -1,0 +1,93 @@
+# Translator for Krea2 Regional Builder workflows (canvas regions + optional base LoRA).
+# Higher priority than krea-ai so regional graphs win over the plain Krea2 match.
+name = "k2regional"
+priority = 120
+filetype = "png"
+chunk = "prompt"
+
+[[trigger]]
+node_class = "Krea2RegionalBuilder"
+
+[[field]]
+label = "Type"
+constant = "Krea2 Regional Image"
+
+[[field]]
+label = "Model Name"
+node_class = "UNETLoader"
+input = "unet_name"
+
+[[field]]
+label = "LoRA"
+node_class = "LoraLoader"
+extract = "lora_loader"
+
+[[field]]
+label = "LoRA"
+node_class = "Power Lora Loader (rgthree)"
+extract = "power_lora"
+
+[[field]]
+label = "LoRA"
+node_class = "Lora Loader (LoraManager)"
+extract = "lora_manager"
+
+[[field]]
+label = "LoRA"
+node_class = "Krea2RegionalBuilder"
+extract = "krea2_regional_loras"
+
+[[field]]
+label = "Positive Prompt"
+node_class = "Krea2RegionalBuilder"
+input = "base_prompt"
+
+[[field]]
+label = "Background"
+node_class = "Krea2RegionalBuilder"
+input = "background"
+
+[[field]]
+label = "Aesthetics"
+node_class = "Krea2RegionalBuilder"
+input = "aesthetics"
+
+[[field]]
+label = "Lighting"
+node_class = "Krea2RegionalBuilder"
+input = "lighting"
+
+[[field]]
+label = "Medium"
+node_class = "Krea2RegionalBuilder"
+input = "medium"
+
+[[field]]
+label = "Region"
+node_class = "Krea2RegionalBuilder"
+extract = "krea2_regional_regions"
+
+[[field]]
+label = "seed"
+node_class = "KSampler"
+input = "seed"
+
+[[field]]
+label = "steps"
+node_class = "KSampler"
+input = "steps"
+
+[[field]]
+label = "cfg"
+node_class = "KSampler"
+input = "cfg"
+
+[[field]]
+label = "sampler"
+node_class = "KSampler"
+input = "sampler_name"
+
+[[field]]
+label = "scheduler"
+node_class = "KSampler"
+input = "scheduler"

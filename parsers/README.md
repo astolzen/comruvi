@@ -151,6 +151,8 @@ For structured LoRA nodes, set `extract` instead of `input`:
 | `lora_manager` | `loras` array or `loras.__value__` | name, model/CLIP strengths, active/inactive |
 | `power_lora` | `lora_1`, `lora_2`, … with `{ on, lora, strength }` | Power Lora Loader (rgthree) |
 | `lora_stack` | `lora_01` / `strength_01`, … | Lora Loader Stack (rgthree); skips `"None"` |
+| `krea2_regional_loras` | `regions_data` JSON (+ optional `<lora:…>` in `base_prompt` / region `desc`) | regional + inline LoRAs |
+| `krea2_regional_regions` | `regions_data` JSON | numbered region descriptions |
 
 ```toml
 [[field]]

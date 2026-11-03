@@ -72,7 +72,8 @@ pub struct FieldRule {
     /// Input key under the node's `inputs` object.
     #[serde(default)]
     pub input: Option<String>,
-    /// power_lora | lora_manager | lora_loader | lora_stack
+    /// power_lora | lora_manager | lora_loader | lora_stack |
+    /// krea2_regional_loras | krea2_regional_regions
     #[serde(default)]
     pub extract: Option<String>,
     #[serde(default)]
@@ -359,6 +360,7 @@ pub fn write_image_metadata_cache(image: &Path, parsers: &[ParserConfig]) -> Res
 
 const DEFAULT_PARSERS: &[(&str, &str)] = &[
     ("krea-ai.toml", include_str!("../parsers/krea-ai.toml")),
+    ("k2regional.toml", include_str!("../parsers/k2regional.toml")),
     ("anima-ai.toml", include_str!("../parsers/anima-ai.toml")),
     ("z-image.toml", include_str!("../parsers/z-image.toml")),
     ("flux2.toml", include_str!("../parsers/flux2.toml")),
@@ -590,8 +592,110 @@ fn run_extract(kind: &str, inputs: &serde_json::Map<String, Value>) -> Vec<Strin
             }
             out
         }
+        // Krea2RegionalBuilder: LoRAs from regions_data[].loras and inline <lora:…:…> tags.
+        "krea2_regional_loras" => krea2_regional_loras(inputs),
+        // Krea2RegionalBuilder: one row per region description.
+        "krea2_regional_regions" => krea2_regional_regions(inputs),
         _ => vec![],
     }
+}
+
+/// Parse `<lora:name:strength>` tags from free text (ComfyUI / Krea convention).
+fn parse_inline_lora_tags(text: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 7 < bytes.len() {
+        if !text[i..].starts_with("<lora:") {
+            i += 1;
+            continue;
+        }
+        let start = i + "<lora:".len();
+        let Some(end_rel) = text[start..].find('>') else { break; };
+        let inner = &text[start..start + end_rel];
+        i = start + end_rel + 1;
+        let (name, strength) = match inner.rsplit_once(':') {
+            Some((name, strength)) => (name.trim(), strength.trim()),
+            None => (inner.trim(), "1"),
+        };
+        if !name.is_empty() {
+            out.push((name.to_string(), strength.to_string()));
+        }
+    }
+    out
+}
+
+fn push_unique_lora(
+    out: &mut Vec<String>,
+    seen: &mut std::collections::BTreeSet<String>,
+    name: &str,
+    strength: &str,
+) {
+    let key = name.to_ascii_lowercase();
+    if name.is_empty() || !seen.insert(key) {
+        return;
+    }
+    out.push(format!("{name} (weight {strength}; active)"));
+}
+
+fn krea2_regional_loras(inputs: &serde_json::Map<String, Value>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+
+    if let Some(raw) = input_text(inputs, "regions_data") {
+        if let Ok(data) = serde_json::from_str::<Value>(&raw) {
+            if let Some(regions) = data.get("regions").and_then(Value::as_array) {
+                for region in regions {
+                    if let Some(loras) = region.get("loras").and_then(Value::as_array) {
+                        for lora in loras {
+                            let name = lora.get("name").and_then(Value::as_str).unwrap_or("");
+                            let strength = lora
+                                .get("strength")
+                                .map(value_to_string)
+                                .unwrap_or_else(|| "?".into());
+                            push_unique_lora(&mut out, &mut seen, name, &strength);
+                        }
+                    }
+                    if let Some(desc) = region.get("desc").and_then(Value::as_str) {
+                        for (name, strength) in parse_inline_lora_tags(desc) {
+                            push_unique_lora(&mut out, &mut seen, &name, &strength);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(base) = input_text(inputs, "base_prompt") {
+        for (name, strength) in parse_inline_lora_tags(&base) {
+            push_unique_lora(&mut out, &mut seen, &name, &strength);
+        }
+    }
+
+    out
+}
+
+fn krea2_regional_regions(inputs: &serde_json::Map<String, Value>) -> Vec<String> {
+    let Some(raw) = input_text(inputs, "regions_data") else {
+        return vec![];
+    };
+    let Ok(data) = serde_json::from_str::<Value>(&raw) else {
+        return vec![];
+    };
+    let Some(regions) = data.get("regions").and_then(Value::as_array) else {
+        return vec![];
+    };
+    regions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, region)| {
+            let desc = region.get("desc").and_then(Value::as_str)?.trim();
+            if desc.is_empty() {
+                return None;
+            }
+            Some(format!("{}. {desc}", index + 1))
+        })
+        .collect()
 }
 
 fn comfy_prompt_fields(prompt: &str, fields: &mut Vec<(String, String)>) {
@@ -909,6 +1013,21 @@ mod tests {
         let meta = read_metadata(&photo, &parsers()).unwrap();
         assert!(meta.fields.iter().any(|(k, v)| k == "Kamera" && v.contains("EOS R8")));
         assert!(meta.fields.iter().any(|(k, _)| k == "ISO"));
+    }
+
+    #[test]
+    fn parses_k2regional_sample_when_present() {
+        let path = PathBuf::from(r"F:\sync\Pictures\test\Krea2_2026-11-03_181903_00001_.png");
+        if !path.is_file() {
+            return;
+        }
+        let meta = read_metadata(&path, &parsers()).unwrap();
+        assert_eq!(meta.parser.as_deref(), Some("k2regional"));
+        assert!(meta.fields.iter().any(|(k, v)| k == "Type" && v.contains("Regional")));
+        assert!(meta.fields.iter().any(|(k, _)| k == "Positive Prompt"));
+        assert!(meta.fields.iter().any(|(k, v)| k == "LoRA" && v.contains("4n4st4s14k2")));
+        assert!(meta.fields.iter().any(|(k, v)| k == "LoRA" && v.contains("Detailer-KREA2")));
+        assert!(meta.fields.iter().any(|(k, v)| k == "Region" && v.starts_with("1. ")));
     }
 
     #[test]
