@@ -1,0 +1,42 @@
+# Example translator for Digikam-tagged JPEGs.
+# Digikam is one of many apps that write XMP into JPEGs — copy this file and
+# change the `xmp = "…"` / `exif = "…"` keys to match whatever Full meta shows
+# for your files (Lightroom, Bridge, Windows properties, camera firmware, …).
+name = "digikam"
+priority = 60
+filetype = "jpg"
+
+[[trigger]]
+xmp = "TagsList"
+
+[[field]]
+label = "Type"
+constant = "Digikam photo"
+
+[[field]]
+label = "Kamera"
+exif = "Model"
+
+[[field]]
+label = "Tags"
+xmp = "TagsList"
+
+[[field]]
+label = "Catalog Sets"
+xmp = "CatalogSets"
+
+[[field]]
+label = "Subject"
+xmp = "subject"
+
+[[field]]
+label = "Hierarchical"
+xmp = "HierarchicalSubject"
+
+[[field]]
+label = "XP Keywords"
+exif = "XPKeywords"
+
+[[field]]
+label = "Date"
+exif = "DateTimeOriginal"

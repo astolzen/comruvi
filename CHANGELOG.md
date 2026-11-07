@@ -2,6 +2,41 @@
 
 All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
+## Unreleased
+
+## 0.1.1a-beta — 2026-11-07
+
+Test build for **extended JPEG metadata** (XMP/EXIF in Full meta + broader
+`search_blob`). Package/VERSION remains `0.1.1`. **May be rolled back** if
+collection or DB growth slows the tool too much.
+
+### Added
+
+- Toolbar **Full meta** panel (off by default): splits the right Info column and
+  shows raw embedded metadata — EXIF, JPEG XMP, PNG text chunks — for writing
+  translators.
+- JPEG **XMP** extraction (embedded APP1 + optional `.jpg.xmp` sidecar): every
+  flattened property is listed in Full meta and usable in translators via
+  `xmp = "…"` (any namespace — Digikam, Lightroom, `dc:`, `xmp:`, …).
+- Broader EXIF dump in Full meta (all readable tags + `XPKeywords` aliases).
+- Volltext search indexes raw EXIF/XMP/PNG text as well as translator fields
+  (metadata cache v4).
+- Example `digikam.toml` translator showing how to bind Digikam’s XMP keys.
+
+### Fixed
+
+- Metadata cache rebuild no longer fully decodes every image (header-only size)
+  or slurps entire JPEGs for XMP (streams APP1 until SOS) — restores responsive
+  updates and allows closing while jobs run.
+- UI no longer freezes during thumb/meta jobs: thumbnail creation stopped writing
+  the metadata DB on every file (which also marked empty caches as fresh),
+  thumbnails and metadata jobs no longer run in parallel, selection uses the
+  cache instead of re-parsing, and full-image decode is deferred until
+  Filmstrip/viewer need it.
+- Camera JPEG thumbnails use the embedded Exif preview (fallback: fast
+  `thumbnail()`), not a full-resolution Lanczos decode — large `IMG_*.JPG`
+  files no longer stall the “creating thumbnails” job.
+
 ## 0.1.1-beta — 2026-11-07
 
 ### Added

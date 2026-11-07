@@ -56,6 +56,9 @@ pub struct Trigger {
     /// EXIF tag must exist (friendly name, e.g. Model, Make, LensModel).
     #[serde(default)]
     pub exif: Option<String>,
+    /// XMP property must exist (short or `prefix:Name`, e.g. `subject`, `dc:subject`).
+    #[serde(default)]
+    pub xmp: Option<String>,
     /// Raw text metadata key must exist (e.g. prompt).
     #[serde(default)]
     pub text_key: Option<String>,
@@ -81,6 +84,9 @@ pub struct FieldRule {
     pub extract: Option<String>,
     #[serde(default)]
     pub exif: Option<String>,
+    /// XMP property (short or `prefix:Name`, e.g. `Rating` / `xmp:Rating` / `dc:subject`).
+    #[serde(default)]
+    pub xmp: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -88,6 +94,8 @@ pub struct ImageMetaBag {
     pub extension: String,
     pub text: BTreeMap<String, String>,
     pub exif: BTreeMap<String, String>,
+    /// Flattened XMP properties from JPEG APP1 / sidecar (`dc:subject`, `xmp:Rating`, …).
+    pub xmp: BTreeMap<String, String>,
     pub prompt_nodes: Option<serde_json::Map<String, Value>>,
 }
 
@@ -128,9 +136,21 @@ pub struct CachedImageMeta {
     /// rewriting the original image.
     #[serde(default)]
     pub orientation: u8,
+    /// Lowercased EXIF/XMP/PNG raw keys+values so volltext can match embedded
+    /// metadata even when no translator surfaces those fields.
+    #[serde(default)]
+    pub raw_search: String,
 }
 
-pub const METADATA_CACHE_VERSION: u32 = 3;
+pub const METADATA_CACHE_VERSION: u32 = 4;
+
+fn raw_search_blob(raw: &[(String, String)]) -> String {
+    raw.iter()
+        .flat_map(|(key, value)| [key.as_str(), value.as_str()])
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase()
+}
 
 /// `.metadata/<filename>.json` next to the image (Geeqie-style sidecar layout).
 pub fn metadata_cache_path(image: &Path) -> PathBuf {
@@ -233,6 +253,9 @@ impl CachedImageMeta {
             parts.push(key.clone());
             parts.push(value.clone());
         }
+        if !self.raw_search.is_empty() {
+            parts.push(self.raw_search.clone());
+        }
         parts.join("\n").to_ascii_lowercase()
     }
 
@@ -294,6 +317,7 @@ pub fn write_image_metadata_cache_file(image: &Path, parsers: &[ParserConfig]) -
         loras_active: derive_loras(&meta.fields, true),
         fields: meta.fields,
         orientation,
+        raw_search: raw_search_blob(&meta.raw),
     };
     write_cached_image_meta_file(image, &cached)
 }
@@ -305,6 +329,7 @@ const DEFAULT_PARSERS: &[(&str, &str)] = &[
     ("z-image.toml", include_str!("../parsers/z-image.toml")),
     ("flux2.toml", include_str!("../parsers/flux2.toml")),
     ("comfyui-generic.toml", include_str!("../parsers/comfyui-generic.toml")),
+    ("digikam.toml", include_str!("../parsers/digikam.toml")),
     ("photo.toml", include_str!("../parsers/photo.toml")),
 ];
 
@@ -346,12 +371,19 @@ pub fn load_parsers(dir: &Path) -> Result<Vec<ParserConfig>> {
 }
 
 pub fn read_metadata(path: &Path, parsers: &[ParserConfig]) -> Result<Metadata> {
-    let image = image::open(path)?;
-    let (width, height) = oriented_dimensions(image.width(), image.height(), exif_orientation(path));
+    // Header-only size probe — never decode pixels (metadata jobs hit every file).
+    let (width, height) = match image::image_dimensions(path) {
+        Ok((w, h)) => oriented_dimensions(w, h, exif_orientation(path)),
+        Err(_) => (0, 0),
+    };
     let mut meta = Metadata {
         fields: vec![
             ("File".into(), path.file_name().unwrap_or_default().to_string_lossy().into()),
-            ("Dimensions".into(), format!("{width} × {height}")),
+            ("Dimensions".into(), if width > 0 {
+                format!("{width} × {height}")
+            } else {
+                "? × ?".into()
+            }),
             ("Format".into(), path.extension().and_then(|x| x.to_str()).unwrap_or("unknown").to_ascii_uppercase()),
         ],
         raw: vec![],
@@ -364,6 +396,9 @@ pub fn read_metadata(path: &Path, parsers: &[ParserConfig]) -> Result<Metadata> 
     }
     for (key, value) in &bag.exif {
         meta.raw.push((format!("exif:{key}"), value.clone()));
+    }
+    for (key, value) in &bag.xmp {
+        meta.raw.push((format!("xmp:{key}"), value.clone()));
     }
 
     if let Some(parser) = select_parser(parsers, &bag) {
@@ -389,6 +424,7 @@ fn collect_bag(path: &Path) -> Result<ImageMetaBag> {
         }
     } else if matches!(ext.as_str(), "jpg" | "jpeg") {
         bag.exif = read_exif_map(path)?;
+        bag.xmp = crate::xmp_jpeg::load_xmp_map(path).unwrap_or_default();
     }
     Ok(bag)
 }
@@ -414,7 +450,10 @@ fn trigger_match(trigger: &Trigger, bag: &ImageMetaBag, chunk: &str) -> bool {
         if !bag.text.contains_key(key) { return false; }
     }
     if let Some(tag) = &trigger.exif {
-        if !bag.exif.contains_key(tag) { return false; }
+        if lookup_map(&bag.exif, tag).is_none() { return false; }
+    }
+    if let Some(tag) = &trigger.xmp {
+        if lookup_map(&bag.xmp, tag).is_none() { return false; }
     }
     let needs_node = trigger.node_class.is_some() || trigger.node_title.is_some() || trigger.node_title_contains.is_some();
     if needs_node {
@@ -424,7 +463,26 @@ fn trigger_match(trigger: &Trigger, bag: &ImageMetaBag, chunk: &str) -> bool {
         }
     }
     // A trigger with only empty fields never matches.
-    trigger.text_key.is_some() || trigger.exif.is_some() || needs_node
+    trigger.text_key.is_some() || trigger.exif.is_some() || trigger.xmp.is_some() || needs_node
+}
+
+/// Match exact key, or `prefix:Name` / bare `Name` (case-insensitive).
+fn lookup_map<'a>(map: &'a BTreeMap<String, String>, needle: &str) -> Option<&'a str> {
+    if let Some(value) = map.get(needle) {
+        return Some(value.as_str());
+    }
+    let needle_l = needle.to_ascii_lowercase();
+    for (key, value) in map {
+        if key.eq_ignore_ascii_case(needle) {
+            return Some(value.as_str());
+        }
+        if let Some((_, local)) = key.rsplit_once(':') {
+            if local.eq_ignore_ascii_case(needle) || key.to_ascii_lowercase() == needle_l {
+                return Some(value.as_str());
+            }
+        }
+    }
+    None
 }
 
 fn nodes_for_chunk<'a>(bag: &'a ImageMetaBag, chunk: &str) -> Option<&'a serde_json::Map<String, Value>> {
@@ -457,8 +515,14 @@ fn apply_parser(parser: &ParserConfig, bag: &ImageMetaBag, fields: &mut Vec<(Str
             continue;
         }
         if let Some(tag) = &rule.exif {
-            if let Some(value) = bag.exif.get(tag) {
-                fields.push((rule.label.clone(), value.clone()));
+            if let Some(value) = lookup_map(&bag.exif, tag) {
+                fields.push((rule.label.clone(), value.to_string()));
+            }
+            continue;
+        }
+        if let Some(tag) = &rule.xmp {
+            if let Some(value) = lookup_map(&bag.xmp, tag) {
+                fields.push((rule.label.clone(), value.to_string()));
             }
             continue;
         }
@@ -770,6 +834,7 @@ fn read_exif_map(path: &Path) -> Result<BTreeMap<String, String>> {
         return Ok(BTreeMap::new());
     };
     let mut map = BTreeMap::new();
+    // Friendly camera tags first (formatted rationals, ISO aliases).
     for (name, tag) in EXIF_TAGS {
         if let Some(field) = exif.get_field(*tag, In::PRIMARY).or_else(|| exif.get_field(*tag, In::THUMBNAIL)) {
             if let Some(text) = format_exif_value(*tag, &field.value) {
@@ -789,7 +854,53 @@ fn read_exif_map(path: &Path) -> Result<BTreeMap<String, String>> {
     if let Some(iso) = map.get("PhotographicSensitivity").cloned() {
         map.entry("ISO".into()).or_insert(iso);
     }
+    // Dump every EXIF field so Full meta shows more than the camera shortlist.
+    for field in exif.fields() {
+        let name = field.tag.to_string();
+        if map.contains_key(&name) {
+            continue;
+        }
+        // XP* tags are UTF-16LE blobs — prefer that decode over kamadak's raw dump.
+        if let Some(text) = decode_xp_string(&field.value)
+            .or_else(|| format_exif_value(field.tag, &field.value))
+        {
+            map.insert(name, text);
+        }
+    }
+    // Windows XP keyword tags are often `Tag(0x9C9E)` — expose friendly aliases.
+    for (code, alias) in [
+        (0x9C9B_u16, "XPTitle"),
+        (0x9C9C, "XPComment"),
+        (0x9C9D, "XPAuthor"),
+        (0x9C9E, "XPKeywords"),
+        (0x9C9F, "XPSubject"),
+    ] {
+        let raw_key = format!("Tag(0x{code:04X})");
+        if let Some(value) = map.get(&raw_key).cloned() {
+            map.entry(alias.into()).or_insert(value);
+        }
+    }
     Ok(map)
+}
+
+/// Windows XP EXIF string tags store UTF-16LE bytes.
+fn decode_xp_string(value: &ExifValue) -> Option<String> {
+    let bytes: Vec<u8> = match value {
+        ExifValue::Byte(items) => items.clone(),
+        ExifValue::Undefined(items, _) => items.clone(),
+        _ => return None,
+    };
+    if bytes.len() < 2 {
+        return None;
+    }
+    let u16s: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|u| *u != 0)
+        .collect();
+    let text = String::from_utf16(&u16s).ok()?;
+    let text = text.trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 const EXIF_TAGS: &[(&str, Tag)] = &[

@@ -4,6 +4,8 @@ mod file_drag;
 mod meta_parsers;
 mod meta_store;
 mod ui_icons;
+mod jpeg_thumb;
+mod xmp_jpeg;
 
 use std::{
     collections::BTreeMap,
@@ -20,7 +22,6 @@ use std::{
 use anyhow::{Context, Result};
 use arboard::Clipboard;
 use eframe::egui::{self, ColorImage, Context as EguiContext, Image, ScrollArea, TextureHandle, TextureOptions, Vec2};
-use image::imageops::FilterType;
 use meta_parsers::{default_parser_dir, load_parsers, read_metadata, Metadata, ParserConfig};
 use meta_store::{
     default_metadata_db_path, default_thumbnail_folder, thumbnail_path_for, MetaStore,
@@ -191,7 +192,8 @@ struct App {
     /// Visible images after the active view filter.
     entries: Vec<Entry>,
     selected: Option<usize>, mode: Mode,
-    show_tree: bool, show_info: bool, viewer_open: bool, about_open: bool, config_open: bool,
+    show_tree: bool, show_info: bool, show_full_meta: bool,
+    viewer_open: bool, about_open: bool, config_open: bool,
     thumb_textures: BTreeMap<PathBuf, TextureHandle>,
     image_texture: Option<TextureHandle>, about_icon: Option<TextureHandle>,
     metadata: Metadata, notice: Option<String>, config: Config,
@@ -406,7 +408,8 @@ impl App {
         let mut app = Self {
             tree_root: folder.clone(), folder,
             all_entries: vec![], entries: vec![], selected: None, mode: Mode::Thumbnails,
-            show_tree: true, show_info: true, viewer_open: false, about_open: false, config_open: false,
+            show_tree: true, show_info: true, show_full_meta: false,
+            viewer_open: false, about_open: false, config_open: false,
             thumb_textures: BTreeMap::new(),
             image_texture: None, about_icon: None, metadata: Metadata::default(), notice, config, parsers,
             thumb_columns: 1, thumb_loads_left: 0, folder_children: BTreeMap::new(), folder_open: BTreeMap::new(),
@@ -514,8 +517,12 @@ impl App {
         if let Some(receiver) = &self.folder_events {
             while receiver.try_recv().is_ok() {}
         }
+        // Thumbnails first; metadata starts when thumbs finish (or immediately if none).
+        // Running both at once saturates disk and the SQLite lock, freezing the UI.
         self.queue_missing_thumbnails();
-        self.queue_missing_metadata();
+        if self.thumbnail_job.is_none() {
+            self.queue_missing_metadata();
+        }
     }
 
     fn cancel_background_jobs(&mut self) {
@@ -707,8 +714,47 @@ impl App {
         self.selected = Some(index); self.image_texture = None;
         self.film_view.reset(); self.viewer_view.reset();
         let path = self.entries[index].path.clone();
-        self.metadata = read_metadata(&path, &self.parsers).unwrap_or_else(|e| Metadata::error(e.to_string()));
-        self.reload_selected_texture(ctx);
+        self.metadata = self.load_selection_metadata(&path);
+        // Full-res decode is expensive — only when Filmstrip/viewer actually need it.
+        if self.mode == Mode::Filmstrip || self.viewer_open {
+            self.reload_selected_texture(ctx);
+        }
+    }
+
+    /// Prefer the metadata cache on the UI thread; re-parse only for Full meta or a miss.
+    fn load_selection_metadata(&self, path: &Path) -> Metadata {
+        let file_name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if self.show_full_meta {
+            return read_metadata(path, &self.parsers)
+                .unwrap_or_else(|e| Metadata::error(e.to_string()));
+        }
+        if !self.meta_store.is_stale(path) {
+            if let Some(cached) = self.meta_store.load(path) {
+                let mut fields = vec![("File".into(), file_name)];
+                fields.extend(cached.fields);
+                return Metadata {
+                    fields,
+                    raw: Vec::new(),
+                    parser: cached.parser,
+                };
+            }
+        }
+        // During a background rebuild, do not re-parse on the UI thread (disk lock-up).
+        if self.metadata_job.is_some() {
+            return Metadata {
+                fields: vec![
+                    ("File".into(), file_name),
+                    ("Status".into(), "Indexing metadata…".into()),
+                ],
+                raw: Vec::new(),
+                parser: None,
+            };
+        }
+        read_metadata(path, &self.parsers).unwrap_or_else(|e| Metadata::error(e.to_string()))
     }
 
     fn reload_selected_texture(&mut self, ctx: &EguiContext) {
@@ -719,6 +765,14 @@ impl App {
         self.image_texture = load_display_image(&path, &self.meta_store)
             .ok()
             .map(|image| ctx.load_texture("full-image", image, TextureOptions::default()));
+    }
+
+    /// Lazily decode the selected full image when Filmstrip/viewer needs it.
+    fn ensure_selected_texture(&mut self, ctx: &EguiContext) {
+        if self.image_texture.is_some() || self.selected.is_none() {
+            return;
+        }
+        self.reload_selected_texture(ctx);
     }
 
     /// Rotate the selected image by `steps_cw` quarter-turns (mod 4). Updates
@@ -996,6 +1050,10 @@ impl App {
             if !cancelled {
                 self.notice = Some(format!("Thumbnail update finished ({total} images)."));
                 self.queue_missing_thumbnails();
+                // Metadata waits for thumbs so both don't thrash disk/DB together.
+                if self.thumbnail_job.is_none() {
+                    self.queue_missing_metadata();
+                }
             }
         }
         if meta_done {
@@ -1049,6 +1107,10 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &EguiContext, frame: &mut eframe::Frame) {
+        // Stop disk-heavy workers immediately so the window can close while jobs were running.
+        if ctx.input(|input| input.viewport().close_requested()) {
+            self.cancel_background_jobs();
+        }
         self.thumb_loads_left = 4;
         self.poll_open_requests(ctx);
         self.ensure_folder_watch(ctx);
@@ -1176,8 +1238,25 @@ impl eframe::App for App {
                         self.apply_view_filter(Some(ctx));
                     }
                 }
-                ui.separator(); ui.checkbox(&mut self.show_tree, "Folders"); ui.checkbox(&mut self.show_info, "Info"); ui.separator();
-                ui.selectable_value(&mut self.mode, Mode::Thumbnails, "Thumbnails"); ui.selectable_value(&mut self.mode, Mode::Filmstrip, "Filmstrip");
+                ui.separator();
+                ui.checkbox(&mut self.show_tree, "Folders");
+                ui.checkbox(&mut self.show_info, "Info");
+                let full_meta_toggle = ui
+                    .checkbox(&mut self.show_full_meta, "Full meta")
+                    .on_hover_text("Show raw embedded metadata (EXIF / XMP / PNG) for parser authoring");
+                if full_meta_toggle.changed() && self.show_full_meta {
+                    if let Some(path) = self.selected_path() {
+                        self.metadata = read_metadata(&path, &self.parsers)
+                            .unwrap_or_else(|e| Metadata::error(e.to_string()));
+                    }
+                }
+                ui.separator();
+                let prev_mode = self.mode;
+                ui.selectable_value(&mut self.mode, Mode::Thumbnails, "Thumbnails");
+                ui.selectable_value(&mut self.mode, Mode::Filmstrip, "Filmstrip");
+                if self.mode == Mode::Filmstrip && prev_mode != Mode::Filmstrip {
+                    self.ensure_selected_texture(ctx);
+                }
                 if self.mode == Mode::Filmstrip {
                     let zoom = match self.film_view.scale {
                         Some(scale) => format!("Zoom: {:.0}%", scale * 100.0),
@@ -1256,10 +1335,26 @@ impl eframe::App for App {
             });
             if changed { self.load_folder(); self.remember_folder(); }
         }
-        if self.show_info {
-            egui::SidePanel::right("metadata").resizable(true).default_width(330.0).show(ctx, |ui| {
-                metadata_ui(ui, self, ctx);
-            });
+        if self.show_info || self.show_full_meta {
+            let width = if self.show_full_meta { 420.0 } else { 330.0 };
+            egui::SidePanel::right("metadata")
+                .resizable(true)
+                .default_width(width)
+                // Content (long JSON) must not widen the panel into the gallery.
+                .width_range(240.0..=560.0)
+                .show(ctx, |ui| {
+                    // Lock layout width so child widgets cannot expand the side panel.
+                    let panel_w = ui.available_width();
+                    ui.set_width(panel_w);
+                    ui.set_max_width(panel_w);
+                    if self.show_info && self.show_full_meta {
+                        info_full_meta_split(ui, self, ctx);
+                    } else if self.show_info {
+                        metadata_ui(ui, self, ctx);
+                    } else {
+                        full_meta_ui(ui, self);
+                    }
+                });
         }
         egui::CentralPanel::default().show(ctx, |ui| match self.mode { Mode::Thumbnails => thumbnails_ui(ui, self, ctx), Mode::Filmstrip => filmstrip_ui(ui, self, ctx) });
         if self.viewer_open { viewer_ui(ctx, self); }
@@ -1381,6 +1476,7 @@ fn thumbnails_ui(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
 
 fn filmstrip_ui(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
     if app.selected.is_none() && !app.entries.is_empty() { app.select(0, ctx); }
+    app.ensure_selected_texture(ctx);
     let image_height = (ui.available_height() - 195.0).max(100.0);
     if let Some(t) = &app.image_texture {
         if zoomable_image(ui, t, &mut app.film_view, Vec2::new(ui.available_width(), image_height), true) {
@@ -1422,6 +1518,7 @@ fn filmstrip_ui(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
 }
 
 fn viewer_ui(ctx: &EguiContext, app: &mut App) {
+    app.ensure_selected_texture(ctx);
     let mut close_requested = false;
     let mut start_file_drag = false;
     let mut rotate_cw = false;
@@ -1689,7 +1786,13 @@ fn metadata_ui(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
     let has_workflow = m.raw.iter().any(|(key, _)| key.eq_ignore_ascii_case("workflow"));
     let workflow = m.raw.iter().find(|(key, _)| key.eq_ignore_ascii_case("workflow")).map(|(_, value)| value.clone());
 
-    ScrollArea::vertical().show(ui, |ui| {
+    let scroll_h = ui.available_height();
+    ScrollArea::vertical()
+        .id_salt("metadata_info_scroll")
+        .max_height(scroll_h)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+        ui.set_max_width(ui.available_width());
         // Render translator fields in config order. LoRA rows stay grouped with
         // inactive entries shown in gray ("; inactive)" marker from extractors).
         let mut index = 0;
@@ -1761,6 +1864,258 @@ fn metadata_field(ui: &mut egui::Ui, key: &str, value: &str) {
     ui.horizontal_wrapped(|ui| { ui.label(value); if ui.small_button("Copy").clicked() { copy(value); } });
     ui.separator();
 }
+
+/// Vertical split: Info on top, Full meta below. Heights are fixed unless the user drags the handle.
+fn info_full_meta_split(ui: &mut egui::Ui, app: &mut App, ctx: &EguiContext) {
+    const SEP: f32 = 6.0;
+    const MIN_FRAC: f32 = 0.2;
+    const MAX_FRAC: f32 = 0.8;
+    let split_id = egui::Id::new("info_full_meta_split_frac");
+    let mut fraction = ui.ctx().data_mut(|d| *d.get_temp_mut_or(split_id, 0.5_f32));
+
+    let total_h = ui.available_height();
+    let panel_w = ui.available_width();
+    let info_h = ((total_h - SEP) * fraction).clamp(80.0, (total_h - SEP - 80.0).max(80.0));
+    let meta_h = (total_h - SEP - info_h).max(80.0);
+
+    ui.allocate_ui_with_layout(
+        Vec2::new(panel_w, info_h),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_height(info_h);
+            ui.set_max_height(info_h);
+            ui.set_max_width(panel_w);
+            // Clip so Info content cannot paint/expand past the fixed split.
+            ui.set_clip_rect(ui.max_rect());
+            metadata_ui(ui, app, ctx);
+        },
+    );
+
+    let (sep_rect, sep_resp) = ui.allocate_exact_size(Vec2::new(panel_w, SEP), egui::Sense::click_and_drag());
+    let sep_fill = if sep_resp.hovered() || sep_resp.dragged() {
+        egui::Color32::from_gray(120)
+    } else {
+        egui::Color32::from_gray(70)
+    };
+    ui.painter().rect_filled(sep_rect, 0.0, sep_fill);
+    if sep_resp.dragged() {
+        let delta = sep_resp.drag_delta().y;
+        fraction = ((info_h + delta) / (total_h - SEP)).clamp(MIN_FRAC, MAX_FRAC);
+        ui.ctx().data_mut(|d| d.insert_temp(split_id, fraction));
+    }
+    sep_resp.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+
+    ui.allocate_ui_with_layout(
+        Vec2::new(panel_w, meta_h),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.set_max_height(meta_h);
+            ui.set_min_height(meta_h);
+            ui.set_max_width(panel_w);
+            full_meta_ui(ui, app);
+        },
+    );
+}
+
+/// Raw embedded metadata for parser authoring: EXIF as key/value, PNG chunks as colored JSON.
+fn full_meta_ui(ui: &mut egui::Ui, app: &App) {
+    let max_h = ui.available_height();
+    let panel_w = ui.available_width();
+    ui.set_max_width(panel_w);
+    ui.heading("Full metadata");
+    ui.label(
+        egui::RichText::new("Complete extract — use keys/values when writing translators")
+            .small()
+            .weak(),
+    );
+    ui.separator();
+    let body_h = ui.available_height().min(max_h).max(40.0);
+    ScrollArea::vertical()
+        .id_salt("full_meta_scroll")
+        .max_height(body_h)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.set_max_width(panel_w);
+            if app.metadata.raw.is_empty() {
+                ui.label("No embedded metadata found in this file.");
+                return;
+            }
+            for (key, value) in &app.metadata.raw {
+                let is_exif = key.starts_with("exif:");
+                let is_xmp = key.starts_with("xmp:");
+                let title = if is_exif {
+                    key.trim_start_matches("exif:").to_string()
+                } else if is_xmp {
+                    key.trim_start_matches("xmp:").to_string()
+                } else {
+                    key.clone()
+                };
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new(&title)
+                            .strong()
+                            .color(egui::Color32::from_rgb(86, 156, 214)),
+                    );
+                    if is_exif {
+                        ui.label(egui::RichText::new("EXIF").small().weak());
+                    } else if is_xmp {
+                        ui.label(egui::RichText::new("XMP").small().weak());
+                    } else {
+                        ui.label(egui::RichText::new("PNG text").small().weak());
+                    }
+                    if ui.small_button("Copy").clicked() {
+                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) {
+                            if let Ok(pretty) = serde_json::to_string_pretty(&parsed) {
+                                copy(&pretty);
+                            } else {
+                                copy(value);
+                            }
+                        } else {
+                            copy(value);
+                        }
+                    }
+                });
+                if is_exif || is_xmp {
+                    ui.label(egui::RichText::new(value).monospace());
+                } else if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(value) {
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(30, 30, 30))
+                        .inner_margin(8.0)
+                        .corner_radius(4.0)
+                        .show(ui, |ui| {
+                            ui.set_max_width(panel_w - 16.0);
+                            render_json_value(ui, &parsed, 0);
+                        });
+                } else {
+                    ui.label(egui::RichText::new(value).monospace());
+                }
+                ui.add_space(8.0);
+                ui.separator();
+            }
+        });
+}
+
+const JSON_KEY: egui::Color32 = egui::Color32::from_rgb(156, 220, 254);
+const JSON_STR: egui::Color32 = egui::Color32::from_rgb(206, 145, 120);
+const JSON_NUM: egui::Color32 = egui::Color32::from_rgb(181, 206, 168);
+const JSON_KW: egui::Color32 = egui::Color32::from_rgb(197, 134, 192);
+const JSON_PUNCT: egui::Color32 = egui::Color32::from_rgb(212, 212, 212);
+
+fn render_json_value(ui: &mut egui::Ui, value: &serde_json::Value, indent: usize) {
+    let pad = "  ".repeat(indent);
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.is_empty() {
+                ui.label(egui::RichText::new(format!("{pad}{{}}")).monospace().color(JSON_PUNCT));
+                return;
+            }
+            ui.label(egui::RichText::new(format!("{pad}{{")).monospace().color(JSON_PUNCT));
+            let entries: Vec<_> = map.iter().collect();
+            for (i, (key, child)) in entries.iter().enumerate() {
+                let comma = if i + 1 < entries.len() { "," } else { "" };
+                match child {
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new(format!("{pad}  ")).monospace());
+                            ui.label(
+                                egui::RichText::new(format!("\"{key}\""))
+                                    .monospace()
+                                    .color(JSON_KEY),
+                            );
+                            ui.label(egui::RichText::new(":").monospace().color(JSON_PUNCT));
+                        });
+                        render_json_value(ui, child, indent + 1);
+                        if !comma.is_empty() {
+                            ui.label(egui::RichText::new(format!("{pad}  {comma}")).monospace().color(JSON_PUNCT));
+                        }
+                    }
+                    _ => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new(format!("{pad}  ")).monospace());
+                            ui.label(
+                                egui::RichText::new(format!("\"{key}\""))
+                                    .monospace()
+                                    .color(JSON_KEY),
+                            );
+                            ui.label(egui::RichText::new(": ").monospace().color(JSON_PUNCT));
+                            render_json_scalar(ui, child);
+                            if !comma.is_empty() {
+                                ui.label(egui::RichText::new(comma).monospace().color(JSON_PUNCT));
+                            }
+                        });
+                    }
+                }
+            }
+            ui.label(egui::RichText::new(format!("{pad}}}")).monospace().color(JSON_PUNCT));
+        }
+        serde_json::Value::Array(items) => {
+            if items.is_empty() {
+                ui.label(egui::RichText::new(format!("{pad}[]")).monospace().color(JSON_PUNCT));
+                return;
+            }
+            ui.label(egui::RichText::new(format!("{pad}[")).monospace().color(JSON_PUNCT));
+            for (i, child) in items.iter().enumerate() {
+                let comma = if i + 1 < items.len() { "," } else { "" };
+                match child {
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        render_json_value(ui, child, indent + 1);
+                        if !comma.is_empty() {
+                            ui.label(egui::RichText::new(format!("{pad}  {comma}")).monospace().color(JSON_PUNCT));
+                        }
+                    }
+                    _ => {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new(format!("{pad}  ")).monospace());
+                            render_json_scalar(ui, child);
+                            if !comma.is_empty() {
+                                ui.label(egui::RichText::new(comma).monospace().color(JSON_PUNCT));
+                            }
+                        });
+                    }
+                }
+            }
+            ui.label(egui::RichText::new(format!("{pad}]")).monospace().color(JSON_PUNCT));
+        }
+        other => {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(pad).monospace());
+                render_json_scalar(ui, other);
+            });
+        }
+    }
+}
+
+fn render_json_scalar(ui: &mut egui::Ui, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Null => {
+            ui.label(egui::RichText::new("null").monospace().color(JSON_KW));
+        }
+        serde_json::Value::Bool(b) => {
+            ui.label(egui::RichText::new(b.to_string()).monospace().color(JSON_KW));
+        }
+        serde_json::Value::Number(n) => {
+            ui.label(egui::RichText::new(n.to_string()).monospace().color(JSON_NUM));
+        }
+        serde_json::Value::String(s) => {
+            let escaped = s
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+                .replace('\t', "\\t");
+            // Long ComfyUI strings: show wrapping monospace, not one endless line.
+            ui.label(
+                egui::RichText::new(format!("\"{escaped}\""))
+                    .monospace()
+                    .color(JSON_STR),
+            );
+        }
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            ui.label(egui::RichText::new("…").monospace().color(JSON_PUNCT));
+        }
+    }
+}
+
 fn copy(value: &str) { if let Ok(mut clipboard) = Clipboard::new() { let _ = clipboard.set_text(value); } }
 
 fn scan_images(folder: &Path) -> Vec<Entry> {
@@ -1796,15 +2151,20 @@ fn folder_event_relevant(event: &Event, watched_folder: Option<&Path>) -> bool {
 fn is_image(p: &Path) -> bool { matches!(p.extension().and_then(|x| x.to_str()).map(|x| x.to_ascii_lowercase()).as_deref(), Some("png" | "jpg" | "jpeg")) }
 
 /// Build a thumbnail using the display orientation (EXIF-derived or user-adjusted
-/// in the metadata store), and ensure that orientation is persisted.
+/// in the metadata store). Large camera JPEGs use the embedded Exif thumb when
+/// present — full Lanczos decode of 6000×4000 frames was multi-second in debug.
 fn create_thumbnail(source: &Path, destination: &Path, store: &MetaStore) -> Result<()> {
     let quarters = store.display_orientation(source);
-    let _ = store.set_orientation(source, quarters);
-    let img = open_with_quarters(source, quarters)
+    let img = jpeg_thumb::load_preview(source, THUMB_SIZE, quarters)
         .with_context(|| format!("opening {}", source.display()))?;
     if let Some(p) = destination.parent() { fs::create_dir_all(p)?; }
-    img.resize(THUMB_SIZE, THUMB_SIZE, FilterType::Lanczos3)
-        .save_with_format(destination, image::ImageFormat::Png)?;
+    // Preview is already ≤ THUMB_SIZE; keep a final exact fit without Lanczos.
+    let img = if img.width() > THUMB_SIZE || img.height() > THUMB_SIZE {
+        img.thumbnail(THUMB_SIZE, THUMB_SIZE)
+    } else {
+        img
+    };
+    img.save_with_format(destination, image::ImageFormat::Png)?;
     Ok(())
 }
 

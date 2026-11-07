@@ -193,12 +193,10 @@ Comruvi is an independed project and not affiliated with ComfyUI. It does neithe
 
 ## Current status
 
-**0.1.1 beta.** Implemented: folder tree with independent scroll, persistent
-favorites, thumbnail grid, filmstrip, live folder watching, Shift+drag to ComfyUI,
-Home/End navigation, background thumbnail generation, central SQLite metadata /
-central thumbnail store (or distributed sidecars), modular metadata translators
-(ComfyUI + EXIF photo + k2regional), human-readable camera EXIF, EXIF/manual
-orientation (keys **2**/**3**), Config dialog, synchronized secondary viewer,
-Windows MSI installer, embedded taskbar icon, file-association / single-instance
-open, and toolbar **Filter** (full text + active-LoRA filters). See
-[CHANGELOG.md](CHANGELOG.md) for the detailed history.
+**0.1.1a beta** (test build; package version `0.1.1`). Extended JPEG XMP/EXIF in
+Full meta and volltext `search_blob` — may be rolled back if too slow or DB-heavy.
+Also: folder tree, favorites, thumbnails/filmstrip, live folder watching,
+Shift+drag to ComfyUI, central SQLite metadata / central thumbnails (or sidecars),
+modular translators (ComfyUI + EXIF photo + Digikam example + k2regional),
+orientation keys **2**/**3**, Config dialog, Filter, MSI installer. See
+[CHANGELOG.md](CHANGELOG.md).

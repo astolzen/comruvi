@@ -177,9 +177,35 @@ label = "Kamera"
 exif = "Model"
 ```
 
-Supported friendly names include: `Make`, `Model`, `LensModel`, `LensMake`,
+Camera-oriented friendly names include: `Make`, `Model`, `LensModel`, `LensMake`,
 `ExposureTime`, `FNumber`, `ISO`, `PhotographicSensitivity`, `ISOSpeedRatings`,
-`FocalLength`, `DateTimeOriginal`, `DateTime`, `Orientation`.
+`FocalLength`, `DateTimeOriginal`, `DateTime`, `Orientation`, `XPKeywords`.
+Full meta also lists every other EXIF field kamadak-exif can read.
+
+### XMP property (JPEG)
+
+Any XMP property embedded in a JPEG (APP1 packet) or in an optional
+`image.jpg.xmp` sidecar can be used as a trigger or display field. Open
+**Full meta** on a sample file to see the exact key names, then reference them
+here — Digikam, Lightroom, Adobe Bridge, Windows, camera firmware, etc. all
+write different namespaces.
+
+```toml
+[[trigger]]
+xmp = "subject"
+
+[[field]]
+label = "Keywords"
+xmp = "dc:subject"
+
+[[field]]
+label = "Rating"
+xmp = "Rating"
+```
+
+Match by short local name (`subject`, `Rating`, `TagsList`) or the full
+prefixed form (`dc:subject`, `xmp:Rating`, `digiKam:TagsList`). The shipped
+`digikam.toml` is only an example for Digikam’s keys.
 
 ---
 

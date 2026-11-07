@@ -300,6 +300,13 @@ impl MetaStore {
                     loras_active: derive_loras(&meta.fields, true),
                     fields: meta.fields,
                     orientation,
+                    raw_search: meta
+                        .raw
+                        .iter()
+                        .flat_map(|(k, v)| [k.as_str(), v.as_str()])
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .to_ascii_lowercase(),
                 };
                 self.write(image, &cached)
             }
@@ -307,9 +314,33 @@ impl MetaStore {
     }
 
     pub fn display_orientation(&self, image: &Path) -> u8 {
-        if let Some(cached) = self.load(image) {
-            if cached.version >= METADATA_CACHE_VERSION {
-                return cached.orientation % 4;
+        match &self.backend {
+            Backend::Files => {
+                if let Some(cached) = load_cached_image_meta_file(image) {
+                    if cached.version >= METADATA_CACHE_VERSION {
+                        return cached.orientation % 4;
+                    }
+                }
+            }
+            Backend::Db { conn } => {
+                if let Ok((mtime, size)) = source_stamp(image) {
+                    let id = image_record_id(&file_name_of(image), mtime, size);
+                    // Light query — avoid loading fields_json/loras on the thumb/UI path.
+                    if let Ok(conn) = conn.lock() {
+                        if let Ok(Some((version, orientation))) = conn
+                            .query_row(
+                                "SELECT cache_version, orientation FROM images WHERE id = ?1",
+                                params![id],
+                                |row| Ok((row.get::<_, i64>(0)? as u32, row.get::<_, i64>(1)? as u8)),
+                            )
+                            .optional()
+                        {
+                            if version >= METADATA_CACHE_VERSION {
+                                return orientation % 4;
+                            }
+                        }
+                    }
+                }
             }
         }
         exif_to_quarter_turns(exif_orientation(image))
@@ -336,6 +367,7 @@ impl MetaStore {
                 loras: Vec::new(),
                 loras_active: Vec::new(),
                 orientation,
+                raw_search: String::new(),
             };
             self.write(image, &cached)
         }
@@ -504,6 +536,8 @@ fn load_db_row(conn: &Connection, id: &str) -> Option<CachedImageMeta> {
         loras,
         loras_active,
         orientation,
+        // Search text lives in the DB `search_blob` column; not reloaded here.
+        raw_search: String::new(),
     })
 }
 
@@ -654,6 +688,7 @@ mod tests {
             loras: vec!["Foo".into()],
             loras_active: vec!["Foo".into()],
             orientation: 2,
+            raw_search: "xmp:dc:subject\nboots, rope".into(),
         };
         store.write(&image, &cached).unwrap();
         assert!(!store.is_stale(&image));
