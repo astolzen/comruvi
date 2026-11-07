@@ -2,6 +2,7 @@
 
 mod file_drag;
 mod meta_parsers;
+mod meta_store;
 mod ui_icons;
 
 use std::{
@@ -20,10 +21,10 @@ use anyhow::{Context, Result};
 use arboard::Clipboard;
 use eframe::egui::{self, ColorImage, Context as EguiContext, Image, ScrollArea, TextureHandle, TextureOptions, Vec2};
 use image::imageops::FilterType;
-use meta_parsers::{
-    default_parser_dir, display_orientation, image_has_active_lora, image_matches_volltext,
-    load_parsers, metadata_cache_is_stale, read_metadata, set_cached_orientation,
-    write_image_metadata_cache, Metadata, ParserConfig,
+use meta_parsers::{default_parser_dir, load_parsers, read_metadata, Metadata, ParserConfig};
+use meta_store::{
+    default_metadata_db_path, default_thumbnail_folder, thumbnail_path_for, MetaStore,
+    MetadataMode, ThumbnailMode,
 };
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -190,7 +191,7 @@ struct App {
     /// Visible images after the active view filter.
     entries: Vec<Entry>,
     selected: Option<usize>, mode: Mode,
-    show_tree: bool, show_info: bool, viewer_open: bool, about_open: bool,
+    show_tree: bool, show_info: bool, viewer_open: bool, about_open: bool, config_open: bool,
     thumb_textures: BTreeMap<PathBuf, TextureHandle>,
     image_texture: Option<TextureHandle>, about_icon: Option<TextureHandle>,
     metadata: Metadata, notice: Option<String>, config: Config,
@@ -224,6 +225,19 @@ struct App {
     view_filter: ViewFilter,
     /// Bumped on every folder load so stale background workers are ignored/cancelled.
     job_generation: Arc<AtomicU64>,
+    /// File sidecars or SQLite — shared with background metadata/thumbnail jobs.
+    meta_store: Arc<MetaStore>,
+    /// Draft settings while the Config window is open.
+    config_draft: Option<ConfigDraft>,
+}
+
+/// Editable copy of storage-related config fields for the Config dialog.
+#[derive(Clone)]
+struct ConfigDraft {
+    metadata: MetadataMode,
+    metadata_db: String,
+    thumbnails: ThumbnailMode,
+    thumbnail_folder: String,
 }
 
 #[derive(Default, Clone)]
@@ -258,16 +272,29 @@ impl ViewTransform { fn reset(&mut self) { self.scale = None; self.pan = Vec2::Z
 
 /// The deliberately small, dependency-free TOML representation keeps preferences
 /// portable and readable at `~/.config/comruvi/config.toml`.
+#[derive(Clone)]
 struct Config {
     favorites: Vec<PathBuf>, lastfolder: Option<PathBuf>,
     thumbnailsize: String, fonttype: String, fontsize: u32, displaymode: String,
     parserdir: PathBuf,
+    /// `files` (per-folder `.metadata`) or `db` (central SQLite).
+    metadata: MetadataMode,
+    /// SQLite path when `metadata = db` (ignored for `files`).
+    metadata_db: PathBuf,
+    /// `distributed` (per-folder `.thumbnails`) or `central`.
+    thumbnails: ThumbnailMode,
+    /// Root folder when `thumbnails = central`.
+    thumbnail_folder: PathBuf,
 }
 impl Config {
     fn defaults() -> Self {
         Self {
             favorites: vec![], lastfolder: None, thumbnailsize: "160x160".into(), fonttype: "default".into(),
             fontsize: 14, displaymode: "dark".into(), parserdir: default_parser_dir(),
+            metadata: MetadataMode::Db,
+            metadata_db: default_metadata_db_path(),
+            thumbnails: ThumbnailMode::Central,
+            thumbnail_folder: default_thumbnail_folder(),
         }
     }
     fn path() -> PathBuf {
@@ -288,6 +315,10 @@ impl Config {
                 "fontsize" => if let Ok(size) = value.parse() { config.fontsize = size; },
                 "displaymode" => config.displaymode = value,
                 "parserdir" => if !value.is_empty() { config.parserdir = PathBuf::from(value); },
+                "metadata" => config.metadata = MetadataMode::parse(&value),
+                "metadata_db" => if !value.is_empty() { config.metadata_db = PathBuf::from(value); },
+                "thumbnails" => config.thumbnails = ThumbnailMode::parse(&value),
+                "thumbnail_folder" => if !value.is_empty() { config.thumbnail_folder = PathBuf::from(value); },
                 _ if key.starts_with("quick") && key[5..].parse::<usize>().is_ok_and(|index| index < 10) && !value.is_empty() => config.favorites.push(PathBuf::from(value)),
                 _ => {}
             }
@@ -300,17 +331,34 @@ impl Config {
         if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
         let quote = |value: &str| value.replace('\\', "\\\\").replace('"', "\\\"");
         let mut contents = format!(
-            "version = {CONFIG_VERSION}\nthumbnailsize = \"{}\"\nfonttype = \"{}\"\nfontsize = {}\ndisplaymode = \"{}\"\nparserdir = \"{}\"\n",
+            "version = {CONFIG_VERSION}\nthumbnailsize = \"{}\"\nfonttype = \"{}\"\nfontsize = {}\ndisplaymode = \"{}\"\nparserdir = \"{}\"\nmetadata = \"{}\"\nmetadata_db = \"{}\"\nthumbnails = \"{}\"\nthumbnail_folder = \"{}\"\n",
             quote(&self.thumbnailsize),
             quote(&self.fonttype),
             self.fontsize,
             quote(&self.displaymode),
             quote(&self.parserdir.to_string_lossy()),
+            self.metadata.as_str(),
+            quote(&self.metadata_db.to_string_lossy()),
+            self.thumbnails.as_str(),
+            quote(&self.thumbnail_folder.to_string_lossy()),
         );
         if let Some(folder) = &self.lastfolder { contents.push_str(&format!("lastfolder = \"{}\"\n", quote(&folder.to_string_lossy()))); }
         for (index, favorite) in self.favorites.iter().take(10).enumerate() { contents.push_str(&format!("quick{index} = \"{}\"\n", quote(&favorite.to_string_lossy()))); }
         fs::write(path, contents)?;
         Ok(())
+    }
+
+    fn thumb_path(&self, image: &Path) -> PathBuf {
+        thumbnail_path_for(image, self.thumbnails, &self.thumbnail_folder)
+    }
+
+    fn to_draft(&self) -> ConfigDraft {
+        ConfigDraft {
+            metadata: self.metadata,
+            metadata_db: self.metadata_db.to_string_lossy().into_owned(),
+            thumbnails: self.thumbnails,
+            thumbnail_folder: self.thumbnail_folder.to_string_lossy().into_owned(),
+        }
     }
 }
 
@@ -337,12 +385,30 @@ impl App {
             Ok(parsers) => (parsers, None),
             Err(error) => (Vec::new(), Some(format!("Could not load parsers: {error}"))),
         };
+        let (meta_store, meta_notice) = match MetaStore::open(config.metadata, config.metadata_db.clone()) {
+            Ok(store) => (Arc::new(store), None),
+            Err(error) => {
+                let fallback = Arc::new(
+                    MetaStore::open(MetadataMode::Files, default_metadata_db_path())
+                        .expect("files metadata backend cannot fail to open"),
+                );
+                (
+                    fallback,
+                    Some(format!("Metadata DB unavailable ({error}); using files backend")),
+                )
+            }
+        };
+        let notice = match (parser_notice, meta_notice) {
+            (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
         let mut app = Self {
             tree_root: folder.clone(), folder,
             all_entries: vec![], entries: vec![], selected: None, mode: Mode::Thumbnails,
-            show_tree: true, show_info: true, viewer_open: false, about_open: false,
+            show_tree: true, show_info: true, viewer_open: false, about_open: false, config_open: false,
             thumb_textures: BTreeMap::new(),
-            image_texture: None, about_icon: None, metadata: Metadata::default(), notice: parser_notice, config, parsers,
+            image_texture: None, about_icon: None, metadata: Metadata::default(), notice, config, parsers,
             thumb_columns: 1, thumb_loads_left: 0, folder_children: BTreeMap::new(), folder_open: BTreeMap::new(),
             thumbnail_job: None, metadata_job: None,
             film_view: ViewTransform::default(), viewer_view: ViewTransform::default(),
@@ -352,6 +418,8 @@ impl App {
             pending_external_open,
             view_filter: ViewFilter::default(),
             job_generation: Arc::new(AtomicU64::new(0)),
+            meta_store,
+            config_draft: None,
         };
         app.load_folder();
         // Create/update the config on first launch as well, so every documented
@@ -496,17 +564,18 @@ impl App {
         let selected_path = self.selected_path();
         let needle = self.view_filter.volltext.trim().to_ascii_lowercase();
         let active_lora = self.view_filter.active_lora.clone();
+        let store = Arc::clone(&self.meta_store);
         self.entries = self
             .all_entries
             .iter()
             .filter(|entry| {
                 if !needle.is_empty()
-                    && !image_matches_volltext(&entry.path, &entry.name, &needle)
+                    && !store.matches_volltext(&entry.path, &entry.name, &needle)
                 {
                     return false;
                 }
                 if let Some(lora) = &active_lora {
-                    if !image_has_active_lora(&entry.path, lora) {
+                    if !store.has_active_lora(&entry.path, lora) {
                         return false;
                     }
                 }
@@ -647,7 +716,7 @@ impl App {
             self.image_texture = None;
             return;
         };
-        self.image_texture = load_display_image(&path)
+        self.image_texture = load_display_image(&path, &self.meta_store)
             .ok()
             .map(|image| ctx.load_texture("full-image", image, TextureOptions::default()));
     }
@@ -656,13 +725,13 @@ impl App {
     /// `.metadata` orientation and regenerates the thumbnail; original file untouched.
     fn rotate_selected(&mut self, steps_cw: u8, ctx: &EguiContext) {
         let Some(path) = self.selected_path() else { return; };
-        let next = (display_orientation(&path) + steps_cw) % 4;
-        if let Err(error) = set_cached_orientation(&path, next) {
+        let next = (self.meta_store.display_orientation(&path) + steps_cw) % 4;
+        if let Err(error) = self.meta_store.set_orientation(&path, next) {
             self.notice = Some(format!("Could not save orientation: {error}"));
             return;
         }
-        let thumb = thumbnail_path(&path);
-        if let Err(error) = create_thumbnail(&path, &thumb) {
+        let thumb = self.config.thumb_path(&path);
+        if let Err(error) = create_thumbnail(&path, &thumb, &self.meta_store) {
             self.notice = Some(format!("Could not update thumbnail: {error}"));
         }
         self.thumb_textures.remove(&path);
@@ -674,7 +743,7 @@ impl App {
 
     fn thumbnail(&mut self, entry: &Entry, ctx: &EguiContext) -> Option<TextureHandle> {
         if let Some(t) = self.thumb_textures.get(&entry.path) { return Some(t.clone()); }
-        let thumb = thumbnail_path(&entry.path);
+        let thumb = self.config.thumb_path(&entry.path);
         // Missing thumbnails are generated by the worker, not on the UI thread.
         if !thumb.exists() { return None; }
         // Decode at most a few thumbs per frame; otherwise a large folder freezes
@@ -704,7 +773,7 @@ impl App {
         let paths: Vec<_> = self
             .all_entries
             .iter()
-            .filter(|entry| !thumbnail_path(&entry.path).exists())
+            .filter(|entry| !self.config.thumb_path(&entry.path).exists())
             .map(|entry| entry.path.clone())
             .collect();
         if !paths.is_empty() { self.start_thumbnail_job(paths, false); }
@@ -714,7 +783,7 @@ impl App {
         let paths: Vec<_> = self
             .all_entries
             .iter()
-            .filter(|entry| metadata_cache_is_stale(&entry.path))
+            .filter(|entry| self.meta_store.is_stale(&entry.path))
             .map(|entry| entry.path.clone())
             .collect();
         if !paths.is_empty() {
@@ -729,12 +798,16 @@ impl App {
         let generation = self.job_generation.load(Ordering::Relaxed);
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_flag = Arc::clone(&cancel);
+        let store = Arc::clone(&self.meta_store);
+        let thumb_mode = self.config.thumbnails;
+        let thumb_root = self.config.thumbnail_folder.clone();
         std::thread::spawn(move || {
             for path in job_paths {
                 if cancel_flag.load(Ordering::Relaxed) {
                     break;
                 }
-                let succeeded = create_thumbnail(&path, &thumbnail_path(&path)).is_ok();
+                let dest = thumbnail_path_for(&path, thumb_mode, &thumb_root);
+                let succeeded = create_thumbnail(&path, &dest, &store).is_ok();
                 if sender.send(succeeded).is_err() {
                     break;
                 }
@@ -754,6 +827,54 @@ impl App {
         });
         self.refresh_job_notice();
     }
+
+    fn open_config_dialog(&mut self) {
+        self.config_draft = Some(self.config.to_draft());
+        self.config_open = true;
+    }
+
+    /// Apply Config dialog values: save TOML, reopen metadata store if needed, refresh caches.
+    fn apply_config_draft(&mut self, draft: ConfigDraft) -> Result<()> {
+        let meta_changed = draft.metadata != self.config.metadata
+            || PathBuf::from(draft.metadata_db.trim()) != self.config.metadata_db;
+        let thumb_changed = draft.thumbnails != self.config.thumbnails
+            || PathBuf::from(draft.thumbnail_folder.trim()) != self.config.thumbnail_folder;
+
+        self.config.metadata = draft.metadata;
+        self.config.metadata_db = PathBuf::from(draft.metadata_db.trim());
+        if self.config.metadata_db.as_os_str().is_empty() {
+            self.config.metadata_db = default_metadata_db_path();
+        }
+        self.config.thumbnails = draft.thumbnails;
+        self.config.thumbnail_folder = PathBuf::from(draft.thumbnail_folder.trim());
+        if self.config.thumbnail_folder.as_os_str().is_empty() {
+            self.config.thumbnail_folder = default_thumbnail_folder();
+        }
+        self.config.save()?;
+
+        if meta_changed {
+            match MetaStore::open(self.config.metadata, self.config.metadata_db.clone()) {
+                Ok(store) => {
+                    self.meta_store = Arc::new(store);
+                    self.queue_missing_metadata();
+                }
+                Err(error) => {
+                    self.notice = Some(format!("Could not open metadata store: {error}"));
+                    return Err(error);
+                }
+            }
+        }
+        if thumb_changed {
+            if self.config.thumbnails == ThumbnailMode::Central {
+                let _ = fs::create_dir_all(&self.config.thumbnail_folder);
+            }
+            self.thumb_textures.clear();
+            self.queue_missing_thumbnails();
+        }
+        self.notice = Some("Config saved".into());
+        Ok(())
+    }
+
     fn start_metadata_job(&mut self, paths: Vec<PathBuf>) {
         let total = paths.len();
         if total == 0 { return; }
@@ -763,12 +884,13 @@ impl App {
         let generation = self.job_generation.load(Ordering::Relaxed);
         let cancel = Arc::new(AtomicBool::new(false));
         let cancel_flag = Arc::clone(&cancel);
+        let store = Arc::clone(&self.meta_store);
         std::thread::spawn(move || {
             for path in job_paths {
                 if cancel_flag.load(Ordering::Relaxed) {
                     break;
                 }
-                let succeeded = write_image_metadata_cache(&path, &parsers).is_ok();
+                let succeeded = store.write_image_cache(&path, &parsers).is_ok();
                 if sender.send(succeeded).is_err() {
                     break;
                 }
@@ -978,7 +1100,15 @@ impl eframe::App for App {
                     let meta_busy = self.metadata_job.is_some();
                     if ui
                         .add_enabled(!thumbs_busy, egui::Button::new("Thumbnails"))
-                        .on_hover_text("Rebuild .thumbnails for every image in this folder")
+                        .on_hover_text(match self.config.thumbnails {
+                            ThumbnailMode::Distributed => {
+                                "Rebuild .thumbnails for every image in this folder".into()
+                            }
+                            ThumbnailMode::Central => format!(
+                                "Rebuild central thumbnails under {}",
+                                self.config.thumbnail_folder.display()
+                            ),
+                        })
                         .clicked()
                     {
                         self.recreate_thumbnails();
@@ -986,7 +1116,15 @@ impl eframe::App for App {
                     }
                     if ui
                         .add_enabled(!meta_busy, egui::Button::new("Metadata"))
-                        .on_hover_text("Rebuild .metadata/*.json sidecars for every image in this folder")
+                        .on_hover_text(match self.meta_store.mode() {
+                            MetadataMode::Files => {
+                                "Rebuild .metadata/*.json sidecars for every image in this folder".into()
+                            }
+                            MetadataMode::Db => format!(
+                                "Rebuild metadata rows in {} for every image in this folder",
+                                self.meta_store.db_path().display()
+                            ),
+                        })
                         .clicked()
                     {
                         self.recreate_metadata();
@@ -1054,6 +1192,7 @@ impl eframe::App for App {
                 if let Some(n) = &self.notice { ui.label(n); }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("About").clicked() { self.about_open = true; }
+                    if ui.button("Config").clicked() { self.open_config_dialog(); }
                 });
             });
         });
@@ -1125,6 +1264,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| match self.mode { Mode::Thumbnails => thumbnails_ui(ui, self, ctx), Mode::Filmstrip => filmstrip_ui(ui, self, ctx) });
         if self.viewer_open { viewer_ui(ctx, self); }
         if self.about_open { about_ui(ctx, self); }
+        if self.config_open { config_ui(ctx, self); }
         // OS drag blocks; run after the egui pass so we still have a valid window handle.
         self.run_pending_file_drag(frame);
     }
@@ -1364,6 +1504,149 @@ fn about_ui(ctx: &EguiContext, app: &mut App) {
     if close_requested { app.about_open = false; }
 }
 
+fn config_ui(ctx: &EguiContext, app: &mut App) {
+    if app.config_draft.is_none() {
+        app.config_draft = Some(app.config.to_draft());
+    }
+    let mut save = false;
+    let mut cancel = false;
+    let mut browse_db = false;
+    let mut browse_thumbs = false;
+    let mut reset_db = false;
+    let mut reset_thumbs = false;
+    let mut open = app.config_open;
+
+    egui::Window::new("Config")
+        .id(egui::Id::new("comruvi-config-window"))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_size([520.0, 420.0])
+        .show(ctx, |ui| {
+            let Some(draft) = app.config_draft.as_mut() else { return; };
+
+            ui.heading("Metadata storage");
+            ui.label(
+                egui::RichText::new(
+                    "files = per-folder .metadata JSON · db = central SQLite (path-independent id)",
+                )
+                .small()
+                .weak(),
+            );
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut draft.metadata, MetadataMode::Files, "files");
+                ui.selectable_value(&mut draft.metadata, MetadataMode::Db, "db");
+            });
+            ui.add_enabled_ui(draft.metadata == MetadataMode::Db, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("metadata_db");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.metadata_db)
+                            .desired_width(320.0)
+                            .hint_text("%LOCALAPPDATA%\\comruvi\\metadata.sqlite"),
+                    );
+                    if ui.button("Browse…").clicked() {
+                        browse_db = true;
+                    }
+                    if ui.button("Default").clicked() {
+                        reset_db = true;
+                    }
+                });
+            });
+
+            ui.add_space(12.0);
+            ui.heading("Thumbnail storage");
+            ui.label(
+                egui::RichText::new(
+                    "distributed = .thumbnails next to images · central = aa/bb/<id>.png under thumbnail_folder",
+                )
+                .small()
+                .weak(),
+            );
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut draft.thumbnails, ThumbnailMode::Distributed, "distributed");
+                ui.selectable_value(&mut draft.thumbnails, ThumbnailMode::Central, "central");
+            });
+            ui.add_enabled_ui(draft.thumbnails == ThumbnailMode::Central, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("thumbnail_folder");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut draft.thumbnail_folder)
+                            .desired_width(300.0)
+                            .hint_text("%LOCALAPPDATA%\\comruvi\\thumbnails"),
+                    );
+                    if ui.button("Browse…").clicked() {
+                        browse_thumbs = true;
+                    }
+                    if ui.button("Default").clicked() {
+                        reset_thumbs = true;
+                    }
+                });
+            });
+
+            ui.add_space(16.0);
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button("Save").clicked() {
+                    save = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+    if browse_db {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Metadata SQLite database")
+            .add_filter("SQLite", &["sqlite", "db"])
+            .set_file_name("metadata.sqlite")
+            .save_file()
+        {
+            if let Some(draft) = app.config_draft.as_mut() {
+                draft.metadata_db = path.to_string_lossy().into_owned();
+            }
+        }
+    }
+    if browse_thumbs {
+        if let Some(path) = rfd::FileDialog::new()
+            .set_title("Central thumbnail folder")
+            .pick_folder()
+        {
+            if let Some(draft) = app.config_draft.as_mut() {
+                draft.thumbnail_folder = path.to_string_lossy().into_owned();
+            }
+        }
+    }
+    if reset_db {
+        if let Some(draft) = app.config_draft.as_mut() {
+            draft.metadata_db = default_metadata_db_path().to_string_lossy().into_owned();
+        }
+    }
+    if reset_thumbs {
+        if let Some(draft) = app.config_draft.as_mut() {
+            draft.thumbnail_folder = default_thumbnail_folder().to_string_lossy().into_owned();
+        }
+    }
+    if save {
+        if let Some(draft) = app.config_draft.take() {
+            if app.apply_config_draft(draft).is_ok() {
+                open = false;
+            } else {
+                // Keep dialog open; draft reflects whatever was persisted / current config.
+                app.config_draft = Some(app.config.to_draft());
+            }
+        }
+    }
+    if cancel {
+        open = false;
+    }
+    app.config_open = open;
+    if !open {
+        app.config_draft = None;
+    }
+}
+
 /// Draw an image into a clipped viewport with independent zoom and pan state.
 /// `None` scale means "fit viewport"; `Some(1.0)` means original pixels.
 /// Returns true when Shift+drag should start an OS file drag-out (ComfyUI drop).
@@ -1511,13 +1794,12 @@ fn folder_event_relevant(event: &Event, watched_folder: Option<&Path>) -> bool {
 }
 
 fn is_image(p: &Path) -> bool { matches!(p.extension().and_then(|x| x.to_str()).map(|x| x.to_ascii_lowercase()).as_deref(), Some("png" | "jpg" | "jpeg")) }
-fn thumbnail_path(image: &Path) -> PathBuf { image.parent().unwrap_or(Path::new(".")).join(".thumbnails").join(format!("{}.png", image.file_name().unwrap_or_default().to_string_lossy())) }
 
 /// Build a thumbnail using the display orientation (EXIF-derived or user-adjusted
-/// in `.metadata`), and ensure that orientation is stored in the sidecar.
-fn create_thumbnail(source: &Path, destination: &Path) -> Result<()> {
-    let quarters = display_orientation(source);
-    let _ = set_cached_orientation(source, quarters);
+/// in the metadata store), and ensure that orientation is persisted.
+fn create_thumbnail(source: &Path, destination: &Path, store: &MetaStore) -> Result<()> {
+    let quarters = store.display_orientation(source);
+    let _ = store.set_orientation(source, quarters);
     let img = open_with_quarters(source, quarters)
         .with_context(|| format!("opening {}", source.display()))?;
     if let Some(p) = destination.parent() { fs::create_dir_all(p)?; }
@@ -1532,8 +1814,8 @@ fn load_raw_image(path: &Path) -> Result<ColorImage> {
     Ok(ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
 }
 
-fn load_display_image(path: &Path) -> Result<ColorImage> {
-    let img = open_with_quarters(path, display_orientation(path))?.to_rgba8();
+fn load_display_image(path: &Path, store: &MetaStore) -> Result<ColorImage> {
+    let img = open_with_quarters(path, store.display_orientation(path))?.to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
     Ok(ColorImage::from_rgba_unmultiplied(size, img.as_raw()))
 }

@@ -2,6 +2,30 @@
 
 All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
+## 0.1.1-beta — 2026-11-07
+
+### Added
+
+- Config `metadata = "files" | "db"` chooses sidecar JSON vs a central SQLite store;
+  `metadata_db` sets the database path (Windows default
+  `%LOCALAPPDATA%\comruvi\metadata.sqlite`).
+- SQLite rows are keyed by SHA-256 of file name + mtime + size (no folder path), so
+  moving images between folders keeps cached metadata and filters stay fast on large
+  libraries.
+- Config `thumbnails = "distributed" | "central"` with `thumbnail_folder` (default
+  `%LOCALAPPDATA%\comruvi\thumbnails\`). Central thumbs use the same content id in a
+  two-level hash tree (`aa/bb/<id>.png`).
+- **Config** toolbar dialog to switch metadata/thumbnail backends and edit paths.
+- Project skill `.cursor/skills/version-release` for compile, MSI, docs, version bump,
+  git, and GitHub Release.
+- `k2regional` translator for Krea2 Regional Builder workflows.
+
+### Changed
+
+- Default config (fresh install / app defaults) uses `metadata = "db"` and
+  `thumbnails = "central"` under `%LOCALAPPDATA%\comruvi\`.
+- Config writes `version = 0.11`.
+
 ## 0.1.0-beta — 2026-11-01
 
 First beta release (package version `0.1.0`).

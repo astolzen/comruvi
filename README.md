@@ -30,9 +30,9 @@ powershell -ExecutionPolicy Bypass -File .\installer\pack-windows.ps1
 **MSI:** `dist/comruvi-<version>-windows-x64.msi`
 
 ```powershell
-msiexec /i dist\comruvi-0.1.0-windows-x64.msi
+msiexec /i dist\comruvi-0.1.1-windows-x64.msi
 # quiet, keep existing config/parsers:
-msiexec /i dist\comruvi-0.1.0-windows-x64.msi CONFLICTACTION=Keep /qn
+msiexec /i dist\comruvi-0.1.1-windows-x64.msi CONFLICTACTION=Keep /qn
 ```
 
 The installer shows a beta Accept/Decline warning, then the **AGPL-3.0**
@@ -74,7 +74,7 @@ comruvi may create:
   `.thumbnails/image.jpg.png`)
 - `.metadata/` — JSON sidecars for generation metadata (`image.png` →
   `.metadata/image.png.json`), built in the background like thumbnails and
-  rebuilt via **Recreate → Metadata**
+  rebuilt via **Recreate → Metadata** (when `metadata = "files"`)
 
 Supported input formats in this beta release are PNG, JPG, and JPEG.
 
@@ -123,11 +123,38 @@ Supported input formats in this beta release are PNG, JPG, and JPEG.
 
 comruvi creates a readable TOML configuration at
 `~/.config/comruvi/config.toml` (on Windows, `%USERPROFILE%\.config\comruvi\config.toml`).
-It records `version = 0.10`, the last opened folder, `parserdir` (directory of
-translator files), and up to ten favorites as `quick0` through `quick9`; unused
-quick keys are omitted. It also writes the reserved future settings
-`thumbnailsize`, `fonttype`, `fontsize`, and `displaymode`. The lower part of
-the Folders pane provides controls to add, select, and remove favorites.
+It records `version = 0.11`, the last opened folder, `parserdir` (directory of
+translator files), `metadata` / `metadata_db` / `thumbnails` /
+`thumbnail_folder` (see below), and up to ten favorites as `quick0` through
+`quick9`; unused quick keys are omitted. It also writes the reserved future
+settings `thumbnailsize`, `fonttype`, `fontsize`, and `displaymode`. The lower
+part of the Folders pane provides controls to add, select, and remove favorites.
+
+### Metadata and thumbnail storage
+
+These keys are also editable in the app via **Config** (toolbar). Fresh installs
+default to central SQLite metadata and central thumbnails:
+
+```toml
+metadata = "db"
+metadata_db = "C:\\Users\\…\\AppData\\Local\\comruvi\\metadata.sqlite"
+# metadata = "files"   # optional: per-folder .metadata/<name>.json
+
+thumbnails = "central"
+thumbnail_folder = "C:\\Users\\…\\AppData\\Local\\comruvi\\thumbnails"
+# thumbnails = "distributed"   # optional: per-folder .thumbnails/<name>.png
+```
+
+With `metadata = "db"`, filters and **Recreate → Metadata** read/write the SQLite
+file. Each image row is identified by a hash of **file name + mtime + size** (not
+the folder path), so moving a file between directories does not require rebuilding
+its metadata. On Windows the default database is
+`%LOCALAPPDATA%\comruvi\metadata.sqlite`.
+
+With `thumbnails = "central"`, thumbnails are stored under `thumbnail_folder` as
+`aa/bb/<same-hash>.png` (two directory levels from the content id). Moving the
+original image keeps the same thumbnail path. Default folder:
+`%LOCALAPPDATA%\comruvi\thumbnails\`.
 
 When an AI image embeds a ComfyUI `workflow` chunk, the info pane offers
 **Copy workflow**.
@@ -166,12 +193,12 @@ Comruvi is an independed project and not affiliated with ComfyUI. It does neithe
 
 ## Current status
 
-**0.1.0 beta.** Implemented: folder tree with independent scroll, persistent
+**0.1.1 beta.** Implemented: folder tree with independent scroll, persistent
 favorites, thumbnail grid, filmstrip, live folder watching, Shift+drag to ComfyUI,
-Home/End navigation, background thumbnail and `.metadata` cache generation,
-modular metadata translators (ComfyUI + EXIF photo), human-readable camera EXIF
-(aperture/shutter/focal length), EXIF/manual orientation (keys **2**/**3**), a
-synchronized secondary viewer window with zoom/pan (title shows file name),
+Home/End navigation, background thumbnail generation, central SQLite metadata /
+central thumbnail store (or distributed sidecars), modular metadata translators
+(ComfyUI + EXIF photo + k2regional), human-readable camera EXIF, EXIF/manual
+orientation (keys **2**/**3**), Config dialog, synchronized secondary viewer,
 Windows MSI installer, embedded taskbar icon, file-association / single-instance
 open, and toolbar **Filter** (full text + active-LoRA filters). See
 [CHANGELOG.md](CHANGELOG.md) for the detailed history.

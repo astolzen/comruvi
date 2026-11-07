@@ -1,5 +1,8 @@
 //! Human-readable metadata translator (parser) configs.
 //!
+//! Cached metadata for filters lives either in per-folder `.metadata` JSON files
+//! or in a central SQLite DB — see `meta_store`.
+//!
 //! Files live under `parserdir` (default `~/.config/comruvi/parsers`) as TOML.
 //! Each file has a trigger that selects it, then a list of display fields.
 //!
@@ -142,7 +145,7 @@ pub fn metadata_cache_path(image: &Path) -> PathBuf {
         .join(format!("{name}.json"))
 }
 
-fn source_stamp(path: &Path) -> Result<(u64, u64)> {
+pub fn source_stamp(path: &Path) -> Result<(u64, u64)> {
     let meta = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
     let mtime = meta
         .modified()
@@ -183,8 +186,8 @@ fn derive_loras(fields: &[(String, String)], active_only: bool) -> Vec<String> {
         .collect()
 }
 
-/// True when no cache exists, version mismatches, or the image changed on disk.
-pub fn metadata_cache_is_stale(image: &Path) -> bool {
+/// True when no file cache exists, version mismatches, or the image changed on disk.
+pub fn metadata_cache_is_stale_file(image: &Path) -> bool {
     let cache = metadata_cache_path(image);
     let Ok(text) = fs::read_to_string(&cache) else {
         return true;
@@ -202,7 +205,7 @@ pub fn metadata_cache_is_stale(image: &Path) -> bool {
 }
 
 /// Load a `.metadata` sidecar if present and parseable.
-pub fn load_cached_image_meta(image: &Path) -> Option<CachedImageMeta> {
+pub fn load_cached_image_meta_file(image: &Path) -> Option<CachedImageMeta> {
     let text = fs::read_to_string(metadata_cache_path(image)).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -233,37 +236,13 @@ impl CachedImageMeta {
         parts.join("\n").to_ascii_lowercase()
     }
 
-    fn active_lora_names(&self) -> Vec<String> {
+    pub fn active_lora_names(&self) -> Vec<String> {
         if !self.loras_active.is_empty() {
             return self.loras_active.clone();
         }
         // Older caches / fallback: derive from LoRA field rows.
         derive_loras(&self.fields, true)
     }
-}
-
-/// Case-insensitive contiguous phrase match against cached metadata (and file name).
-pub fn image_matches_volltext(image: &Path, file_name: &str, needle_lower: &str) -> bool {
-    if needle_lower.is_empty() {
-        return true;
-    }
-    if file_name.to_ascii_lowercase().contains(needle_lower) {
-        return true;
-    }
-    load_cached_image_meta(image)
-        .map(|cached| cached.search_blob_lower().contains(needle_lower))
-        .unwrap_or(false)
-}
-
-/// True when the image's metadata cache lists `lora_name` as an active LoRA.
-pub fn image_has_active_lora(image: &Path, lora_name: &str) -> bool {
-    let Some(cached) = load_cached_image_meta(image) else {
-        return false;
-    };
-    cached
-        .active_lora_names()
-        .iter()
-        .any(|name| name.eq_ignore_ascii_case(lora_name))
 }
 
 /// Map EXIF Orientation (1–8) to quarter-turns clockwise from raw pixels.
@@ -277,18 +256,7 @@ pub fn exif_to_quarter_turns(exif: u32) -> u8 {
     }
 }
 
-/// Display orientation 0–3: from a v3+ cache if present, otherwise from EXIF.
-/// Older sidecars lack a real `orientation` field (serde default 0), so ignore them.
-pub fn display_orientation(image: &Path) -> u8 {
-    if let Some(cached) = load_cached_image_meta(image) {
-        if cached.version >= METADATA_CACHE_VERSION {
-            return cached.orientation % 4;
-        }
-    }
-    exif_to_quarter_turns(exif_orientation(image))
-}
-
-fn write_cached_image_meta(image: &Path, cached: &CachedImageMeta) -> Result<PathBuf> {
+pub fn write_cached_image_meta_file(image: &Path, cached: &CachedImageMeta) -> Result<PathBuf> {
     let dest = metadata_cache_path(image);
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)
@@ -301,40 +269,12 @@ fn write_cached_image_meta(image: &Path, cached: &CachedImageMeta) -> Result<Pat
     Ok(dest)
 }
 
-/// Persist `orientation` (0–3) into the sidecar, creating a stub cache if needed.
-pub fn set_cached_orientation(image: &Path, orientation: u8) -> Result<()> {
-    let orientation = orientation % 4;
-    let (mtime, size) = source_stamp(image)?;
-    if let Some(mut cached) = load_cached_image_meta(image) {
-        cached.version = METADATA_CACHE_VERSION;
-        cached.source_mtime = mtime;
-        cached.source_size = size;
-        cached.orientation = orientation;
-        write_cached_image_meta(image, &cached)?;
-    } else {
-        let cached = CachedImageMeta {
-            version: METADATA_CACHE_VERSION,
-            source_mtime: mtime,
-            source_size: size,
-            parser: None,
-            fields: Vec::new(),
-            positive: None,
-            negative: None,
-            loras: Vec::new(),
-            loras_active: Vec::new(),
-            orientation,
-        };
-        write_cached_image_meta(image, &cached)?;
-    }
-    Ok(())
-}
-
 /// Extract translator fields for `image` and write `.metadata/<name>.json`.
-pub fn write_image_metadata_cache(image: &Path, parsers: &[ParserConfig]) -> Result<PathBuf> {
+pub fn write_image_metadata_cache_file(image: &Path, parsers: &[ParserConfig]) -> Result<PathBuf> {
     let (mtime, size) = source_stamp(image)?;
     // Keep a user-chosen rotation when the source file itself has not changed
     // and the sidecar already carries a real orientation (v3+).
-    let orientation = load_cached_image_meta(image)
+    let orientation = load_cached_image_meta_file(image)
         .filter(|cached| {
             cached.version >= METADATA_CACHE_VERSION
                 && cached.source_mtime == mtime
@@ -355,7 +295,7 @@ pub fn write_image_metadata_cache(image: &Path, parsers: &[ParserConfig]) -> Res
         fields: meta.fields,
         orientation,
     };
-    write_cached_image_meta(image, &cached)
+    write_cached_image_meta_file(image, &cached)
 }
 
 const DEFAULT_PARSERS: &[(&str, &str)] = &[

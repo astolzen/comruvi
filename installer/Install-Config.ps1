@@ -68,6 +68,15 @@ function Backup-ExistingFile([string]$Path, [string]$Stamp) {
 function New-DefaultConfigText([string]$ParserDir, [string]$Pictures, [string]$Ver) {
     $parserEsc = Escape-TomlString $ParserDir
     $picturesEsc = Escape-TomlString $Pictures
+    $dbDefault = [IO.Path]::Combine($env:LOCALAPPDATA, "comruvi", "metadata.sqlite")
+    $thumbDefault = [IO.Path]::Combine($env:LOCALAPPDATA, "comruvi", "thumbnails")
+    if (-not $env:LOCALAPPDATA) {
+        $share = [IO.Path]::Combine($env:USERPROFILE, ".local", "share", "comruvi")
+        $dbDefault = [IO.Path]::Combine($share, "metadata.sqlite")
+        $thumbDefault = [IO.Path]::Combine($share, "thumbnails")
+    }
+    $dbEsc = Escape-TomlString $dbDefault
+    $thumbEsc = Escape-TomlString $thumbDefault
     $configVersion = Format-ConfigVersion $Ver
     return @"
 version = $configVersion
@@ -76,6 +85,10 @@ fonttype = "default"
 fontsize = 14
 displaymode = "dark"
 parserdir = "$parserEsc"
+metadata = "db"
+metadata_db = "$dbEsc"
+thumbnails = "central"
+thumbnail_folder = "$thumbEsc"
 lastfolder = "$picturesEsc"
 "@
 }
