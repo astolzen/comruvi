@@ -1,6 +1,7 @@
 /examples/
 /target/
 /dist/
+/.cursor/
 /.wix/
 /installer/wix/Parsers.wxs
 /installer/wix/version.txt
