@@ -4,11 +4,12 @@ All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
 ## Unreleased
 
-## 0.1.1a-beta — 2026-11-07
+## 0.1.2-beta — 2026-11-08
 
 Test build for **extended JPEG metadata** (XMP/EXIF in Full meta + broader
-`search_blob`). Package/VERSION remains `0.1.1`. **May be rolled back** if
-collection or DB growth slows the tool too much.
+`search_blob`). Replaces the mistaken `0.1.1a` tag that shared package version
+`0.1.1`. **May be rolled back** if collection or DB growth slows the tool too
+much.
 
 ### Added
 

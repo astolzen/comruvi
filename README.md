@@ -30,9 +30,9 @@ powershell -ExecutionPolicy Bypass -File .\installer\pack-windows.ps1
 **MSI:** `dist/comruvi-<version>-windows-x64.msi`
 
 ```powershell
-msiexec /i dist\comruvi-0.1.1-windows-x64.msi
+msiexec /i dist\comruvi-0.1.2-windows-x64.msi
 # quiet, keep existing config/parsers:
-msiexec /i dist\comruvi-0.1.1-windows-x64.msi CONFLICTACTION=Keep /qn
+msiexec /i dist\comruvi-0.1.2-windows-x64.msi CONFLICTACTION=Keep /qn
 ```
 
 The installer shows a beta Accept/Decline warning, then the **AGPL-3.0**
@@ -193,8 +193,8 @@ Comruvi is an independed project and not affiliated with ComfyUI. It does neithe
 
 ## Current status
 
-**0.1.1a beta** (test build; package version `0.1.1`). Extended JPEG XMP/EXIF in
-Full meta and volltext `search_blob` — may be rolled back if too slow or DB-heavy.
+**0.1.2 beta** (test build). Extended JPEG XMP/EXIF in Full meta and volltext
+`search_blob` — may be rolled back if too slow or DB-heavy.
 Also: folder tree, favorites, thumbnails/filmstrip, live folder watching,
 Shift+drag to ComfyUI, central SQLite metadata / central thumbnails (or sidecars),
 modular translators (ComfyUI + EXIF photo + Digikam example + k2regional),
