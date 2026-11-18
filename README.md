@@ -30,9 +30,9 @@ powershell -ExecutionPolicy Bypass -File .\installer\pack-windows.ps1
 **MSI:** `dist/comruvi-<version>-windows-x64.msi`
 
 ```powershell
-msiexec /i dist\comruvi-0.1.3-windows-x64.msi
+msiexec /i dist\comruvi-0.1.4-windows-x64.msi
 # quiet, keep existing config/parsers:
-msiexec /i dist\comruvi-0.1.3-windows-x64.msi CONFLICTACTION=Keep /qn
+msiexec /i dist\comruvi-0.1.4-windows-x64.msi CONFLICTACTION=Keep /qn
 ```
 
 The installer shows a beta warning (Next/Cancel), then a single **AGPL-3.0**
@@ -193,7 +193,8 @@ Comruvi is an independed project and not affiliated with ComfyUI. It does neithe
 
 ## Current status
 
-**0.1.3 beta.** Faster folder navigation on deep/network album trees; extended
+**0.1.4 beta.** MSI beta warning is Next/Cancel (one AGPL accept); About/installer
+binaries match `VERSION`. Also: faster deep/network folder navigation; extended
 JPEG XMP/EXIF in Full meta and volltext `search_blob`.
 Also: folder tree, favorites, thumbnails/filmstrip, live folder watching,
 Shift+drag to ComfyUI, central SQLite metadata / central thumbnails (or sidecars),

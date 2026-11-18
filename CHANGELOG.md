@@ -4,6 +4,8 @@ All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
 ## Unreleased
 
+## 0.1.4-beta — 2026-11-18
+
 ### Fixed
 
 - Windows MSI no longer asks to “Accept” twice: the beta warning is Next/Cancel;
