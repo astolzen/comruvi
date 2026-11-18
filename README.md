@@ -35,8 +35,8 @@ msiexec /i dist\comruvi-0.1.3-windows-x64.msi
 msiexec /i dist\comruvi-0.1.3-windows-x64.msi CONFLICTACTION=Keep /qn
 ```
 
-The installer shows a beta Accept/Decline warning, then the **AGPL-3.0**
-license. If config/parsers already exist, a Yes/No dialog appears:
+The installer shows a beta warning (Next/Cancel), then a single **AGPL-3.0**
+license Accept page. If config/parsers already exist, a Yes/No dialog appears:
 **Yes = Overwrite** (dated backup), **No = Keep** (installer copies named with the
 build version).
 

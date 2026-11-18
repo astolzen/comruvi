@@ -95,11 +95,28 @@ fn embed_windows_icon(manifest_dir: &Path) {
         );
         return;
     }
+    // Use VERSION file, not CARGO_PKG_VERSION: Cargo.toml may only be synced
+    // mid-build, so the package env can lag one compile behind About's COMRUVI_VERSION.
+    let version = fs::read_to_string(manifest_dir.join("VERSION"))
+        .unwrap_or_else(|e| panic!("failed to read VERSION for winresource: {e}"))
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let file_version = if version.split('.').count() >= 4 {
+        version.clone()
+    } else {
+        format!("{version}.0")
+    };
+
     let mut res = winresource::WindowsResource::new();
     res.set_icon("comruvi.ico");
     res.set("FileDescription", "comruvi — ComfyUI Rust Viewer");
     res.set("ProductName", "comruvi");
     res.set("LegalCopyright", "AGPL-3.0-only");
+    res.set("FileVersion", &file_version);
+    res.set("ProductVersion", &version);
     res.compile()
         .unwrap_or_else(|e| panic!("failed to embed Windows resources: {e}"));
 }

@@ -34,14 +34,16 @@ if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $IconBmp) -or -not (Tes
 
 if (-not $SkipBuild) {
     Write-Host "Building release binary (GUI subsystem + embedded icon)..."
+    # Two builds: first may sync Cargo.toml from VERSION; second embeds matching PE version.
     cargo build --release --bin comruvi
     if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed" }
+    cargo build --release --bin comruvi
+    if ($LASTEXITCODE -ne 0) { throw "cargo build --release (refresh) failed" }
 }
 
-$Exe = Join-Path $Root "target\release\comruvi.exe"
-if (-not (Test-Path -LiteralPath $Exe)) {
-    throw "Missing $Exe - build the release binary first."
-}
+$Exe = Get-ComruviReleaseExe -Root $Root
+Write-Host "MSI exe source: $Exe"
+Assert-ComruviExeVersion -Exe $Exe -Version $Version
 
 $env:Path = "$env:USERPROFILE\.dotnet\tools;" + $env:Path
 $wixCmd = Get-Command wix -ErrorAction SilentlyContinue

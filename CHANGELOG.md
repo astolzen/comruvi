@@ -4,6 +4,14 @@ All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
 ## Unreleased
 
+### Fixed
+
+- Windows MSI no longer asks to “Accept” twice: the beta warning is Next/Cancel;
+  only the AGPL page is the license acceptance.
+- About / installer binaries now pick up `VERSION` correctly: pack scripts use
+  `CARGO_TARGET_DIR` (not a stale repo `target\`), assert ProductVersion, and
+  PE resources are stamped from the VERSION file.
+
 ## 0.1.3-beta — 2026-11-18
 
 ### Fixed
