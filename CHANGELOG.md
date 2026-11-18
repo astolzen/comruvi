@@ -4,6 +4,15 @@ All notable changes to comruvi (ComfyUI Rust Viewer) are documented here.
 
 ## Unreleased
 
+## 0.1.3-beta — 2026-11-18
+
+### Fixed
+
+- Deep album trees on network shares no longer freeze the UI on folder switch:
+  folder listings use `DirEntry::file_type()` (no per-file `is_dir` stat), the
+  tree cache is kept across navigation, missing thumb/meta checks run off the
+  UI thread, and central thumb paths reuse scan-time mtime/size.
+
 ## 0.1.2-beta — 2026-11-08
 
 Test build for **extended JPEG metadata** (XMP/EXIF in Full meta + broader

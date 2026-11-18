@@ -24,8 +24,8 @@ use arboard::Clipboard;
 use eframe::egui::{self, ColorImage, Context as EguiContext, Image, ScrollArea, TextureHandle, TextureOptions, Vec2};
 use meta_parsers::{default_parser_dir, load_parsers, read_metadata, Metadata, ParserConfig};
 use meta_store::{
-    default_metadata_db_path, default_thumbnail_folder, thumbnail_path_for, MetaStore,
-    MetadataMode, ThumbnailMode,
+    default_metadata_db_path, default_thumbnail_folder, thumbnail_path_for,
+    thumbnail_path_for_stamp, MetaStore, MetadataMode, ThumbnailMode,
 };
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -183,7 +183,13 @@ fn app_icon_arc() -> std::sync::Arc<egui::IconData> {
 }
 
 #[derive(Clone)]
-struct Entry { path: PathBuf, name: String }
+struct Entry {
+    path: PathBuf,
+    name: String,
+    /// From DirEntry metadata at scan time (avoids re-stat on network shares).
+    mtime: u64,
+    size: u64,
+}
 
 struct App {
     folder: PathBuf, tree_root: PathBuf,
@@ -208,6 +214,8 @@ struct App {
     folder_open: BTreeMap<PathBuf, bool>,
     thumbnail_job: Option<BackgroundJob>,
     metadata_job: Option<BackgroundJob>,
+    /// Background "what is missing?" scan so load_folder does not stat every file on the UI thread.
+    cache_check_job: Option<CacheCheckJob>,
     film_view: ViewTransform, viewer_view: ViewTransform,
     /// When set, start an OS file drag after the UI pass (needs the eframe window handle).
     pending_file_drag: Option<PathBuf>,
@@ -264,6 +272,24 @@ struct BackgroundJob {
     receiver: Receiver<bool>,
     completed: usize,
     total: usize,
+    generation: u64,
+    cancel: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy)]
+enum CacheCheckKind {
+    Thumbs,
+    Meta,
+}
+
+enum CacheCheckResult {
+    Thumbs(Vec<PathBuf>),
+    Meta(Vec<PathBuf>),
+}
+
+struct CacheCheckJob {
+    kind: CacheCheckKind,
+    receiver: Receiver<CacheCheckResult>,
     generation: u64,
     cancel: Arc<AtomicBool>,
 }
@@ -354,6 +380,16 @@ impl Config {
         thumbnail_path_for(image, self.thumbnails, &self.thumbnail_folder)
     }
 
+    fn thumb_path_for_entry(&self, entry: &Entry) -> PathBuf {
+        thumbnail_path_for_stamp(
+            &entry.path,
+            self.thumbnails,
+            &self.thumbnail_folder,
+            entry.mtime,
+            entry.size,
+        )
+    }
+
     fn to_draft(&self) -> ConfigDraft {
         ConfigDraft {
             metadata: self.metadata,
@@ -413,7 +449,7 @@ impl App {
             thumb_textures: BTreeMap::new(),
             image_texture: None, about_icon: None, metadata: Metadata::default(), notice, config, parsers,
             thumb_columns: 1, thumb_loads_left: 0, folder_children: BTreeMap::new(), folder_open: BTreeMap::new(),
-            thumbnail_job: None, metadata_job: None,
+            thumbnail_job: None, metadata_job: None, cache_check_job: None,
             film_view: ViewTransform::default(), viewer_view: ViewTransform::default(),
             pending_file_drag: None, scroll_selection_into_view: false,
             folder_watcher: None, folder_events: None, watched_folder: None, folder_dirty_since: None,
@@ -502,7 +538,8 @@ impl App {
         // Cancel in-flight workers from the previous folder. Dropping the Receiver
         // alone left them writing and spamming the directory watcher.
         self.cancel_background_jobs();
-        self.folder_children.clear();
+        // Keep ancestor tree listings warm on network shares; only refresh this folder.
+        self.folder_children.remove(&self.folder);
         self.all_entries.clear();
         self.entries.clear();
         self.selected = None;
@@ -517,12 +554,8 @@ impl App {
         if let Some(receiver) = &self.folder_events {
             while receiver.try_recv().is_ok() {}
         }
-        // Thumbnails first; metadata starts when thumbs finish (or immediately if none).
-        // Running both at once saturates disk and the SQLite lock, freezing the UI.
-        self.queue_missing_thumbnails();
-        if self.thumbnail_job.is_none() {
-            self.queue_missing_metadata();
-        }
+        // Do not stat every image on the UI thread — background cache check starts jobs.
+        self.start_cache_check(CacheCheckKind::Thumbs);
     }
 
     fn cancel_background_jobs(&mut self) {
@@ -532,8 +565,12 @@ impl App {
         if let Some(job) = &self.metadata_job {
             job.cancel.store(true, Ordering::Relaxed);
         }
+        if let Some(job) = &self.cache_check_job {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
         self.thumbnail_job = None;
         self.metadata_job = None;
+        self.cache_check_job = None;
         self.job_generation.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -562,8 +599,8 @@ impl App {
                 self.metadata = Metadata::default();
             }
         }
-        self.queue_missing_thumbnails();
-        self.queue_missing_metadata();
+        self.folder_children.remove(&self.folder);
+        self.start_cache_check(CacheCheckKind::Thumbs);
         ctx.request_repaint();
     }
 
@@ -658,7 +695,9 @@ impl App {
         // `.thumbnails` / `.metadata` (and parent-dir noise on Windows) would
         // otherwise trigger refresh_entries and fight the jobs — sometimes
         // leaving the UI with an empty image list until restart.
-        let jobs_running = self.thumbnail_job.is_some() || self.metadata_job.is_some();
+        let jobs_running = self.thumbnail_job.is_some()
+            || self.metadata_job.is_some()
+            || self.cache_check_job.is_some();
         if jobs_running {
             if let Some(receiver) = &self.folder_events {
                 while receiver.try_recv().is_ok() {}
@@ -692,13 +731,22 @@ impl App {
     }
     fn tree_children(&mut self, dir: &Path) -> Vec<PathBuf> {
         if let Some(children) = self.folder_children.get(dir) { return children.clone(); }
-        let mut children: Vec<_> = fs::read_dir(dir).into_iter().flatten().flatten()
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.is_dir()
-                    && path.file_name().is_some_and(|name| {
-                        name != ".thumbnails" && name != ".metadata"
-                    })
+        // Prefer DirEntry::file_type() — on Windows this often avoids a second
+        // GetFileAttributes per entry (critical on network shares with many JPGs).
+        let mut children: Vec<_> = fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                if name == ".thumbnails" || name == ".metadata" {
+                    return None;
+                }
+                let is_dir = entry
+                    .file_type()
+                    .map(|ft| ft.is_dir())
+                    .unwrap_or_else(|_| entry.path().is_dir());
+                is_dir.then(|| entry.path())
             })
             .collect();
         children.sort_by(|a, b| {
@@ -797,7 +845,7 @@ impl App {
 
     fn thumbnail(&mut self, entry: &Entry, ctx: &EguiContext) -> Option<TextureHandle> {
         if let Some(t) = self.thumb_textures.get(&entry.path) { return Some(t.clone()); }
-        let thumb = self.config.thumb_path(&entry.path);
+        let thumb = self.config.thumb_path_for_entry(entry);
         // Missing thumbnails are generated by the worker, not on the UI thread.
         if !thumb.exists() { return None; }
         // Decode at most a few thumbs per frame; otherwise a large folder freezes
@@ -823,26 +871,90 @@ impl App {
         self.start_metadata_job(paths);
     }
     fn queue_missing_thumbnails(&mut self) {
-        if self.thumbnail_job.is_some() { return; }
-        let paths: Vec<_> = self
-            .all_entries
-            .iter()
-            .filter(|entry| !self.config.thumb_path(&entry.path).exists())
-            .map(|entry| entry.path.clone())
-            .collect();
-        if !paths.is_empty() { self.start_thumbnail_job(paths, false); }
+        if self.thumbnail_job.is_some() || self.cache_check_job.is_some() {
+            return;
+        }
+        self.start_cache_check(CacheCheckKind::Thumbs);
     }
     fn queue_missing_metadata(&mut self) {
-        if self.metadata_job.is_some() { return; }
-        let paths: Vec<_> = self
-            .all_entries
-            .iter()
-            .filter(|entry| self.meta_store.is_stale(&entry.path))
-            .map(|entry| entry.path.clone())
-            .collect();
-        if !paths.is_empty() {
-            self.start_metadata_job(paths);
+        if self.metadata_job.is_some()
+            || self.thumbnail_job.is_some()
+            || self.cache_check_job.is_some()
+        {
+            return;
         }
+        self.start_cache_check(CacheCheckKind::Meta);
+    }
+
+    /// Scan for missing thumbs/meta off the UI thread (network stats are expensive).
+    fn start_cache_check(&mut self, kind: CacheCheckKind) {
+        if self.cache_check_job.is_some() {
+            return;
+        }
+        match kind {
+            CacheCheckKind::Thumbs if self.thumbnail_job.is_some() => return,
+            CacheCheckKind::Meta
+                if self.metadata_job.is_some() || self.thumbnail_job.is_some() =>
+            {
+                return;
+            }
+            _ => {}
+        }
+        let entries = self.all_entries.clone();
+        if entries.is_empty() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let generation = self.job_generation.load(Ordering::Relaxed);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let cancel_flag = Arc::clone(&cancel);
+        let thumb_mode = self.config.thumbnails;
+        let thumb_root = self.config.thumbnail_folder.clone();
+        let store = Arc::clone(&self.meta_store);
+        std::thread::spawn(move || {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return;
+            }
+            match kind {
+                CacheCheckKind::Thumbs => {
+                    let missing: Vec<PathBuf> = entries
+                        .iter()
+                        .filter(|entry| {
+                            let dest = thumbnail_path_for_stamp(
+                                &entry.path,
+                                thumb_mode,
+                                &thumb_root,
+                                entry.mtime,
+                                entry.size,
+                            );
+                            !dest.exists()
+                        })
+                        .map(|entry| entry.path.clone())
+                        .collect();
+                    let _ = sender.send(CacheCheckResult::Thumbs(missing));
+                }
+                CacheCheckKind::Meta => {
+                    let missing: Vec<PathBuf> = entries
+                        .iter()
+                        .filter(|entry| {
+                            store.is_stale_with_stamp(&entry.path, entry.mtime, entry.size)
+                        })
+                        .map(|entry| entry.path.clone())
+                        .collect();
+                    let _ = sender.send(CacheCheckResult::Meta(missing));
+                }
+            }
+        });
+        self.cache_check_job = Some(CacheCheckJob {
+            kind,
+            receiver,
+            generation,
+            cancel,
+        });
+        self.notice = Some(match kind {
+            CacheCheckKind::Thumbs => "Checking thumbnails…".into(),
+            CacheCheckKind::Meta => "Checking metadata…".into(),
+        });
     }
     fn start_thumbnail_job(&mut self, paths: Vec<PathBuf>, clear_all_textures: bool) {
         let total = paths.len();
@@ -1023,6 +1135,16 @@ impl App {
             }
             self.metadata_job = None;
         }
+        if self
+            .cache_check_job
+            .as_ref()
+            .is_some_and(|job| job.generation != current_gen)
+        {
+            if let Some(job) = &self.cache_check_job {
+                job.cancel.store(true, Ordering::Relaxed);
+            }
+            self.cache_check_job = None;
+        }
 
         if let Some(job) = &mut self.thumbnail_job {
             while job.receiver.try_recv().is_ok() {
@@ -1040,6 +1162,41 @@ impl App {
                 meta_done = true;
             }
         }
+
+        let cache_result = self
+            .cache_check_job
+            .as_ref()
+            .and_then(|job| job.receiver.try_recv().ok());
+        if let Some(result) = cache_result {
+            let cancelled = self
+                .cache_check_job
+                .as_ref()
+                .is_some_and(|job| job.cancel.load(Ordering::Relaxed));
+            self.cache_check_job = None;
+            if !cancelled {
+                match result {
+                    CacheCheckResult::Thumbs(paths) => {
+                        if paths.is_empty() {
+                            self.start_cache_check(CacheCheckKind::Meta);
+                        } else {
+                            self.start_thumbnail_job(paths, false);
+                        }
+                    }
+                    CacheCheckResult::Meta(paths) => {
+                        if paths.is_empty() {
+                            if self.notice.as_deref() == Some("Checking metadata…")
+                                || self.notice.as_deref() == Some("Checking thumbnails…")
+                            {
+                                self.notice = None;
+                            }
+                        } else {
+                            self.start_metadata_job(paths);
+                        }
+                    }
+                }
+            }
+        }
+
         if thumb_done {
             let cancelled = self
                 .thumbnail_job
@@ -1049,11 +1206,8 @@ impl App {
             self.thumbnail_job = None;
             if !cancelled {
                 self.notice = Some(format!("Thumbnail update finished ({total} images)."));
-                self.queue_missing_thumbnails();
                 // Metadata waits for thumbs so both don't thrash disk/DB together.
-                if self.thumbnail_job.is_none() {
-                    self.queue_missing_metadata();
-                }
+                self.start_cache_check(CacheCheckKind::Meta);
             }
         }
         if meta_done {
@@ -1067,16 +1221,25 @@ impl App {
                 self.notice = Some(format!("Metadata cache update finished ({total} images)."));
                 // New sidecars may change which images match the active filter.
                 self.apply_view_filter(None);
-                self.queue_missing_metadata();
+                self.start_cache_check(CacheCheckKind::Meta);
             }
         }
-        if self.thumbnail_job.is_some() || self.metadata_job.is_some() {
+        if self.thumbnail_job.is_some()
+            || self.metadata_job.is_some()
+            || self.cache_check_job.is_some()
+        {
             self.refresh_job_notice();
         }
     }
 
     fn refresh_job_notice(&mut self) {
         let mut parts = Vec::new();
+        if let Some(job) = &self.cache_check_job {
+            parts.push(match job.kind {
+                CacheCheckKind::Thumbs => "Checking thumbnails".into(),
+                CacheCheckKind::Meta => "Checking metadata".into(),
+            });
+        }
         if let Some(job) = &self.thumbnail_job {
             parts.push(format!("Thumbnails ({}/{})", job.completed, job.total));
         }
@@ -1116,7 +1279,10 @@ impl eframe::App for App {
         self.ensure_folder_watch(ctx);
         self.poll_folder_changes(ctx);
         self.poll_background_jobs();
-        if self.thumbnail_job.is_some() || self.metadata_job.is_some() {
+        if self.thumbnail_job.is_some()
+            || self.metadata_job.is_some()
+            || self.cache_check_job.is_some()
+        {
             ctx.request_repaint_after(Duration::from_millis(50));
         }
         // Left/Right move the selection in both modes. Up/Down move by grid row
@@ -1265,7 +1431,10 @@ impl eframe::App for App {
                     ui.separator();
                     ui.label(zoom);
                 }
-                if self.thumbnail_job.is_some() || self.metadata_job.is_some() {
+                if self.thumbnail_job.is_some()
+                    || self.metadata_job.is_some()
+                    || self.cache_check_job.is_some()
+                {
                     ui.add(egui::Spinner::new());
                 }
                 if let Some(n) = &self.notice { ui.label(n); }
@@ -2120,13 +2289,31 @@ fn copy(value: &str) { if let Ok(mut clipboard) = Clipboard::new() { let _ = cli
 
 fn scan_images(folder: &Path) -> Vec<Entry> {
     let Ok(read) = fs::read_dir(folder) else { return Vec::new(); };
-    let mut files: Vec<_> = read.flatten().filter_map(|entry| {
-        let path = entry.path();
-        is_image(&path).then(|| Entry {
-            name: entry.file_name().to_string_lossy().into_owned(),
-            path,
+    let mut files: Vec<_> = read
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !is_image(&path) {
+                return None;
+            }
+            let meta = entry.metadata().ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            Some(Entry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                path,
+                mtime,
+                size: meta.len(),
+            })
         })
-    }).collect();
+        .collect();
     files.sort_by_key(|entry| entry.name.to_lowercase());
     files
 }

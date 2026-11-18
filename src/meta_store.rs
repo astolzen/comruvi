@@ -99,6 +99,18 @@ impl ThumbnailMode {
 
 /// Resolve the on-disk thumbnail path for `image` under the chosen storage mode.
 pub fn thumbnail_path_for(image: &Path, mode: ThumbnailMode, central_root: &Path) -> PathBuf {
+    let (mtime, size) = source_stamp(image).unwrap_or((0, 0));
+    thumbnail_path_for_stamp(image, mode, central_root, mtime, size)
+}
+
+/// Like [`thumbnail_path_for`], but reuses a known mtime/size (avoids a network stat).
+pub fn thumbnail_path_for_stamp(
+    image: &Path,
+    mode: ThumbnailMode,
+    central_root: &Path,
+    mtime: u64,
+    size: u64,
+) -> PathBuf {
     match mode {
         ThumbnailMode::Distributed => {
             let name = image
@@ -116,7 +128,6 @@ pub fn thumbnail_path_for(image: &Path, mode: ThumbnailMode, central_root: &Path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "unknown".into());
-            let (mtime, size) = source_stamp(image).unwrap_or((0, 0));
             let id = image_record_id(&file_name, mtime, size);
             // Two-level fan-out: ab/cd/<full-id>.png
             let a = id.get(0..2).unwrap_or("00");
@@ -212,36 +223,46 @@ impl MetaStore {
     }
 
     pub fn is_stale(&self, image: &Path) -> bool {
+        match source_stamp(image) {
+            Ok((mtime, size)) => self.is_stale_with_stamp(image, mtime, size),
+            Err(_) => true,
+        }
+    }
+
+    /// Like [`Self::is_stale`], but skips a filesystem stat when mtime/size are known.
+    pub fn is_stale_with_stamp(&self, image: &Path, mtime: u64, size: u64) -> bool {
         match &self.backend {
-            Backend::Files => crate::meta_parsers::metadata_cache_is_stale_file(image),
-            Backend::Db { conn } => match source_stamp(image) {
-                Ok((mtime, size)) => {
-                    let id = image_record_id(&file_name_of(image), mtime, size);
-                    let Ok(conn) = conn.lock() else { return true; };
-                    match conn
-                        .query_row(
-                            "SELECT cache_version, source_mtime, source_size FROM images WHERE id = ?1",
-                            params![id],
-                            |row| {
-                                Ok((
-                                    row.get::<_, i64>(0)?,
-                                    row.get::<_, i64>(1)? as u64,
-                                    row.get::<_, i64>(2)? as u64,
-                                ))
-                            },
-                        )
-                        .optional()
-                    {
-                        Ok(Some((version, cached_mtime, cached_size))) => {
-                            version as u32 != METADATA_CACHE_VERSION
-                                || cached_mtime != mtime
-                                || cached_size != size
-                        }
-                        _ => true,
+            Backend::Files => {
+                // File sidecars still need their own mtime check against the image stamp.
+                crate::meta_parsers::metadata_cache_is_stale_file(image)
+            }
+            Backend::Db { conn } => {
+                let id = image_record_id(&file_name_of(image), mtime, size);
+                let Ok(conn) = conn.lock() else {
+                    return true;
+                };
+                match conn
+                    .query_row(
+                        "SELECT cache_version, source_mtime, source_size FROM images WHERE id = ?1",
+                        params![id],
+                        |row| {
+                            Ok((
+                                row.get::<_, i64>(0)? as u32,
+                                row.get::<_, i64>(1)? as u64,
+                                row.get::<_, i64>(2)? as u64,
+                            ))
+                        },
+                    )
+                    .optional()
+                {
+                    Ok(Some((version, cached_mtime, cached_size))) => {
+                        version != METADATA_CACHE_VERSION
+                            || cached_mtime != mtime
+                            || cached_size != size
                     }
+                    _ => true,
                 }
-                Err(_) => true,
-            },
+            }
         }
     }
 
